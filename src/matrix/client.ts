@@ -80,11 +80,20 @@ async function deleteIndexedDBStores(storeName: string): Promise<void> {
 const bootstrapKey = (userId: string, deviceId: string) =>
   `matrix_crypto_bootstrapped:${userId}:${deviceId}`;
 
+// Remove the bootstrap guard for this device (called on logout so that a
+// re-login with the same deviceId triggers bootstrap again if needed).
+export function clearBootstrapGuard(userId: string, deviceId: string): void {
+  localStorage.removeItem(bootstrapKey(userId, deviceId));
+}
+
 // Runs after the client has started and reached PREPARED/SYNCING.
 // Called fire-and-forget — failures are non-fatal for the prototype.
 async function bootstrapCrypto(client: MatrixClient): Promise<void> {
   const key = bootstrapKey(client.getUserId()!, client.getDeviceId()!);
-  if (sessionStorage.getItem(key)) return;
+  // Use localStorage (not sessionStorage) so the guard survives tab close.
+  // Without this, bootstrap runs on every new session even when secret
+  // storage and cross-signing are already fully configured.
+  if (localStorage.getItem(key)) return;
 
   const crypto = client.getCrypto();
   if (!crypto) return;
@@ -125,7 +134,7 @@ async function bootstrapCrypto(client: MatrixClient): Promise<void> {
     console.warn("[matrix] bootstrapCrossSigning failed (non-fatal):", err);
   }
 
-  sessionStorage.setItem(key, "1");
+  localStorage.setItem(key, "1");
 }
 
 export async function createMatrixClient({

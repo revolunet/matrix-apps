@@ -22,11 +22,28 @@ interface AuthState {
   clearAuth: () => void;
 }
 
+// Synchronously check for a saved session before the first render so that
+// AppLayout can make the right decision immediately:
+//   • session found  → "idle"            (SessionLoader will restore it; AppLayout shows spinner)
+//   • no session     → "unauthenticated" (AppLayout redirects to /login with no spinner flash)
+// The key must match SESSION_KEY in src/matrix/auth.ts ("matrix_session").
+function initialLoginState(): LoginState {
+  try {
+    return sessionStorage.getItem("matrix_session") !== null
+      ? "idle"
+      : "unauthenticated";
+  } catch {
+    // sessionStorage blocked (e.g. private-browsing restrictions) — let
+    // SessionLoader discover there is no usable session.
+    return "idle";
+  }
+}
+
 export const useAuthStore = create<AuthState>((set) => ({
   client: null,
   userId: null,
   deviceId: null,
-  loginState: "idle",
+  loginState: initialLoginState(),
 
   setClient: (client, userId, deviceId) =>
     set({ client, userId, deviceId, loginState: "authenticated" }),

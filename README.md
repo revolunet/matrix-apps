@@ -4,13 +4,15 @@ A greenfield React + TypeScript SPA that uses the **Matrix protocol** as a fully
 
 **No backend server.** Vite builds static files. All server concerns are handled by the Matrix homeserver (defaults to `matrix.org`).
 
+For deeper technical detail see [`docs/`](docs/index.md) — architecture decisions, security threat model, tracked limitations, and UX/frontend reference.
+
 ---
 
 ## Tech Stack
 
 | Concern | Library |
 |---|---|
-| Framework | React 18 + TypeScript (Vite 8) |
+| Framework | React 19 + TypeScript (Vite 8) |
 | Matrix SDK | matrix-js-sdk (Rust/WASM crypto via `@matrix-org/matrix-sdk-crypto-wasm`) |
 | Styling | Tailwind CSS v4 (`@tailwindcss/vite`) |
 | State | Zustand + Immer |
@@ -35,7 +37,7 @@ Login → createMatrixClient → initRustCrypto → bootstrapSecretStorage
 
 - Each contact gets **two encrypted Matrix rooms**: a `data` room and a `comments` room.
 - Contact data is written as **full snapshots** in regular timeline events (`org.demo-e2e-app.contact.update`). The most recent event is the current state. This is required because Matrix state events cannot be E2E encrypted.
-- Comments are regular timeline events (`org.demo-e2e-app.contact.comment`) in the comments room.
+- Comments are regular `m.room.message` (msgtype `m.text`) timeline events in the comments room.
 - File attachments are stored as timeline events (`org.demo-e2e-app.contact.file`) in the **data room**. Each event records the filename, MIME type, size, and an `mxc://` URI pointing to the uploaded bytes on the homeserver media repository. The event content is Megolm-encrypted; the raw file bytes are uploaded unencrypted (acceptable for this prototype).
 - The **contact index** is stored in `account_data` (`org.demo-e2e-app.contact_index`) — syncs across devices automatically. Not E2E encrypted (stores only room IDs and display names, not sensitive contact data).
 
@@ -92,12 +94,12 @@ Output is in `dist/` — deploy to any static host (Netlify, GitHub Pages, Cloud
 Missing pieces needed before real-world use:
 
 - [ ] **Key backup restore** — a new recovery key is generated on every login and stored in `sessionStorage`. Returning users on a new device cannot decrypt older messages until `crypto.restoreKeyBackupWithRecoveryKey()` is implemented with a UI to enter their recovery key.
-- [ ] **Session persistence / re-bootstrapping guard** — on page reload, `initRustCrypto` may open a fresh IndexedDB store on a new device or after clearing storage, making historical messages unreadable. Needs a proper "existing device" check that skips re-bootstrapping when the crypto store already exists.
+- [x] **Session persistence / re-bootstrapping guard** — the bootstrap guard is now stored in `localStorage` (keyed by `userId:deviceId`) so it survives tab close. Bootstrap is skipped on all subsequent sessions for the same device and cleared on logout.
 - [ ] **Invitee auto-join room pairing** — `hydrateFromMatrix` auto-joins rooms matching the app name prefix but does not robustly pair `data` + `comments` rooms into a combined index entry on the invitee side. Needs matching by name suffix (`-comments`) to build a complete `IndexEntry`.
 - [ ] **`RoomEvent.MyMembership` listener for live invites** — auto-joining invites is only triggered during `hydrateFromMatrix` (sync PREPARED). A dedicated `RoomEvent.MyMembership` listener in `attachSyncListeners` is needed so invites received during an active session are joined immediately.
 - [ ] **Timeline pagination / backfill** — only the live timeline (last 20 events via `initialSyncLimit`) is read. Contacts in rooms with many events may not surface the latest snapshot. Implement `client.scrollback()` or a dedicated fetch to ensure the most recent `contact.update` event is found.
 - [ ] **Contact deletion** — no delete flow. Needs: remove entry from index (`saveContactIndex`), leave/forget both rooms (`client.leave()` + `client.forget()`), and remove from Zustand store.
-- [ ] **Loading state interstitial** — `AppLayout` redirects to `/login` while `loginState === "idle"` (session still loading). Replace with a loading spinner so the page doesn't flash to login on refresh.
+- [x] **Loading state interstitial** — `loginState` is now initialised synchronously from `sessionStorage` before the first render. Users with no saved session go straight to `/login` with no spinner flash; users with a saved session see the "Connecting to Matrix..." spinner while the async restore runs.
 - [ ] **Error boundaries** — zero React error boundaries. A crypto failure or network error will silently crash the component tree. Add at least a top-level `<ErrorBoundary>`.
 - [ ] **Cross-signing verification UX** — cross-signing is bootstrapped silently. Users should be prompted to verify new devices to maintain end-to-end trust chains.
 - [ ] **Unit / integration tests** — zero test coverage.
@@ -120,7 +122,7 @@ Missing pieces needed before real-world use:
 
 - **WASM bundle size** — the `@matrix-org/matrix-sdk-crypto-wasm` WASM blob is ~5.5 MB (1.9 MB gzipped). This is unavoidable with the Rust crypto backend. Serve with long-lived cache headers and consider a CDN.
 
-- **`localStorage` token storage** — Matrix access tokens are stored in `localStorage`, accessible to any JS on the same origin. Do not co-host this app with untrusted third-party scripts.
+- **`sessionStorage` credential storage** — the Matrix access token, login password (used for cross-signing UIA), and recovery key are all stored in `sessionStorage`, which is readable by any JS on the same origin. A single XSS vulnerability exposes all three simultaneously. Do not co-host this app with untrusted third-party scripts.
 
 - **File uploads are not E2E encrypted** — `client.uploadContent()` sends raw bytes to the homeserver media repository without client-side encryption. The file metadata (filename, size, `mxc://` URI) is stored in an encrypted room event, but the file content itself is accessible to the homeserver operator via the media API. Use Matrix's encrypted attachment spec (`EncryptedFile` content) if confidentiality of file bytes is required.
 

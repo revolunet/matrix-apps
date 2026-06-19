@@ -1,6 +1,6 @@
 import * as sdk from "matrix-js-sdk";
 import { getHomeserverUrl } from "@/lib/constants";
-import { createMatrixClient, startMatrixClient } from "./client";
+import { createMatrixClient, startMatrixClient, clearBootstrapGuard } from "./client";
 import type { MatrixClient } from "matrix-js-sdk";
 
 const SESSION_KEY = "matrix_session";
@@ -98,12 +98,15 @@ export function loadSession(): StoredSession | null {
 }
 
 export async function logout(client: MatrixClient): Promise<void> {
+  const userId = client.getUserId() ?? "";
+  const deviceId = client.getDeviceId() ?? "";
   try {
     await client.logout(true);
   } catch {
     // Best-effort
   }
   client.stopClient();
+  clearBootstrapGuard(userId, deviceId);
   sessionStorage.clear();
 }
 
