@@ -1,10 +1,15 @@
+// Register all entities at startup (import order matters for registry)
+import "@/entities/contact/config";
+import "@/entities/company/config";
+import "@/entities/training/config";
+
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { AppLayout } from "@/components/layout/AppLayout";
-import { ContactsLayout } from "@/components/layout/ContactsLayout";
+import { EntityLayout } from "@/components/layout/EntityLayout";
 import { LoginPage } from "@/pages/LoginPage";
-import { ContactsPage } from "@/pages/ContactsPage";
-import { NewContactPage } from "@/pages/NewContactPage";
-import { ContactDetailPage } from "@/pages/ContactDetailPage";
+import { EntityListPage } from "@/pages/EntityListPage";
+import { NewEntityPage } from "@/pages/NewEntityPage";
+import { EntityDetailPage } from "@/pages/EntityDetailPage";
 import { useEffect } from "react";
 import { initializeSession } from "@/matrix/auth";
 import { useAuthStore } from "@/stores/auth.store";
@@ -39,10 +44,10 @@ function App() {
         <Route path="/login" element={<LoginPage />} />
         <Route element={<AppLayout />}>
           <Route index element={<Navigate to="/contacts" replace />} />
-          <Route element={<ContactsLayout />}>
-            <Route path="/contacts" element={<ContactsPage />} />
-            <Route path="/contacts/new" element={<NewContactPage />} />
-            <Route path="/contacts/:contactId" element={<ContactDetailPage />} />
+          <Route path="/:entityType" element={<EntityLayout />}>
+            <Route index element={<EntityListPage />} />
+            <Route path="new" element={<NewEntityPage />} />
+            <Route path=":entityId" element={<EntityDetailPage />} />
           </Route>
         </Route>
         <Route path="*" element={<Navigate to="/contacts" replace />} />

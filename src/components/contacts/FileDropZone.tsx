@@ -1,10 +1,12 @@
 import { useRef, useState } from "react";
-import { useContactsStore } from "@/stores/contacts.store";
+import { useEntityStore } from "@/stores/entity.store";
 import { useMatrixClient } from "@/hooks/useMatrixClient";
-import { sendContactFile } from "@/matrix/events";
+import { sendEntityFile } from "@/matrix/entity-events";
+import { getEntityConfig } from "@/entities/registry";
 
 interface Props {
-  contactId: string;
+  entityId: string;
+  entityType: string;
   dataRoomId: string;
 }
 
@@ -14,9 +16,10 @@ function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-export function FileDropZone({ contactId, dataRoomId }: Props) {
+export function FileDropZone({ entityId, entityType, dataRoomId }: Props) {
   const client = useMatrixClient();
-  const files = useContactsStore((s) => s.files[contactId]) ?? [];
+  const files =
+    useEntityStore((s) => s.files[entityType]?.[entityId]) ?? [];
   const inputRef = useRef<HTMLInputElement>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [uploading, setUploading] = useState<string[]>([]);
@@ -26,7 +29,8 @@ export function FileDropZone({ contactId, dataRoomId }: Props) {
     setUploading((prev) => [...prev, file.name]);
     setErrors((prev) => prev.filter((e) => !e.startsWith(file.name)));
     try {
-      await sendContactFile(client, dataRoomId, contactId, file);
+      const config = getEntityConfig(entityType);
+      await sendEntityFile(client, config, dataRoomId, entityId, file);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       setErrors((prev) => [...prev, `${file.name}: ${msg}`]);
@@ -56,13 +60,10 @@ export function FileDropZone({ contactId, dataRoomId }: Props) {
   const onDragLeave = () => setIsDragging(false);
 
   const handleDownload = async (mxcUri: string, filename: string) => {
-    // Modern homeservers (Matrix spec ≥ v1.11) require an Authorization header
-    // for media downloads. A plain <a href> can't send headers, so we fetch
-    // the file via the Matrix client and serve it as a blob URL instead.
     const url = client.mxcUrlToHttp(
       mxcUri,
       undefined, undefined, undefined, undefined, undefined,
-      true, // useAuthentication → /_matrix/client/v1/media/download/...
+      true,
     );
     if (!url) return;
     try {
@@ -120,19 +121,8 @@ export function FileDropZone({ contactId, dataRoomId }: Props) {
                 fill="none"
                 viewBox="0 0 24 24"
               >
-                <circle
-                  className="opacity-25"
-                  cx="12"
-                  cy="12"
-                  r="10"
-                  stroke="currentColor"
-                  strokeWidth="4"
-                />
-                <path
-                  className="opacity-75"
-                  fill="currentColor"
-                  d="M4 12a8 8 0 018-8v8H4z"
-                />
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
               </svg>
               <span className="truncate">Uploading {name}…</span>
             </div>
@@ -143,9 +133,7 @@ export function FileDropZone({ contactId, dataRoomId }: Props) {
       {errors.length > 0 && (
         <div className="space-y-1">
           {errors.map((err, i) => (
-            <p key={i} className="text-xs text-red-600">
-              {err}
-            </p>
+            <p key={i} className="text-xs text-red-600">{err}</p>
           ))}
         </div>
       )}

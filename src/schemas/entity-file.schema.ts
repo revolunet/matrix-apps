@@ -1,8 +1,8 @@
 import { z } from "zod";
 
-export const ContactFileSchema = z.object({
+export const EntityFileSchema = z.object({
   id: z.string(),           // Matrix event ID
-  contactId: z.string().uuid(),
+  entityId: z.string().uuid(),
   authorId: z.string(),     // Matrix userId
   filename: z.string(),
   mxcUri: z.string(),       // mxc:// URI from uploadContent
@@ -11,4 +11,4 @@ export const ContactFileSchema = z.object({
   createdAt: z.string().datetime(),
 });
 
-export type ContactFile = z.infer<typeof ContactFileSchema>;
+export type EntityFile = z.infer<typeof EntityFileSchema>;

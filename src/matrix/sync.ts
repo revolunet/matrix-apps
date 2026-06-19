@@ -1,14 +1,11 @@
 import type { MatrixClient, MatrixEvent, Room, RoomMember } from "matrix-js-sdk";
 import { ClientEvent, MatrixEventEvent, RoomEvent, RoomMemberEvent } from "matrix-js-sdk";
-import {
-  EVENT_TYPE_CONTACT_FILE,
-  EVENT_TYPE_CONTACT_UPDATE,
-} from "@/lib/constants";
-import { INDEX_EVENT_TYPE } from "@/schemas/index.schema";
+import { APP_PREFIX } from "@/lib/constants";
 import { useSyncStore } from "@/stores/sync.store";
-import { useContactsStore } from "@/stores/contacts.store";
-import { sendContactUpdate } from "@/matrix/events";
-import { removeContactFromIndex } from "@/matrix/index-room";
+import { useEntityStore } from "@/stores/entity.store";
+import { getAllEntityConfigs, getEntityConfig } from "@/entities/registry";
+import { sendEntityUpdate } from "@/matrix/entity-events";
+import { removeEntityFromIndex } from "@/matrix/entity-index";
 
 let hydrateTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -16,7 +13,7 @@ const scheduleHydrate = (client: MatrixClient) => {
   if (hydrateTimer) clearTimeout(hydrateTimer);
   hydrateTimer = setTimeout(() => {
     hydrateTimer = null;
-    useContactsStore.getState().hydrateFromMatrix(client);
+    useEntityStore.getState().hydrateFromMatrix(client, getAllEntityConfigs());
   }, 400);
 };
 
@@ -25,10 +22,6 @@ function markReady(client: MatrixClient, state: string) {
   if (!useSyncStore.getState().isReady) {
     useSyncStore.getState().setReady(true);
   }
-  // Always (re)schedule hydration — it is idempotent and debounced, so
-  // running it again on every SYNCING event (~30 s) is harmless. This
-  // ensures we recover if the first attempt ran before decryption finished
-  // or if isReady was already true from a previous session in the same tab.
   scheduleHydrate(client);
 }
 
@@ -49,22 +42,28 @@ export function attachSyncListeners(client: MatrixClient): () => void {
     if (!room) return;
 
     const type = event.getType();
-    const { roomToContact, refreshContact, refreshComments, refreshFiles } =
-      useContactsStore.getState();
+    const { roomToEntity, refreshEntity, refreshComments, refreshFiles } =
+      useEntityStore.getState();
 
-    if (type === EVENT_TYPE_CONTACT_UPDATE) {
-      const contactId = roomToContact[room.roomId];
-      if (contactId) refreshContact(client, room.roomId);
+    const ref = roomToEntity[room.roomId];
+    if (!ref) return;
+
+    let config;
+    try {
+      config = getEntityConfig(ref.type);
+    } catch {
+      return;
     }
 
-    if (type === "m.room.message") {
-      const contactId = roomToContact[room.roomId];
-      if (contactId) refreshComments(client, room.roomId);
-    }
+    const updateEventType = `${config.eventTypePrefix}.update`;
+    const fileEventType = `${config.eventTypePrefix}.file`;
 
-    if (type === EVENT_TYPE_CONTACT_FILE) {
-      const contactId = roomToContact[room.roomId];
-      if (contactId) refreshFiles(client, room.roomId);
+    if (type === updateEventType) {
+      refreshEntity(client, config, room.roomId);
+    } else if (type === "m.room.message") {
+      refreshComments(client, room.roomId);
+    } else if (type === fileEventType) {
+      refreshFiles(client, config, room.roomId);
     }
   };
 
@@ -73,77 +72,73 @@ export function attachSyncListeners(client: MatrixClient): () => void {
     const roomId = event.getRoomId();
     if (!roomId) return;
 
-    const { roomToContact, refreshContact, refreshComments, refreshFiles } =
-      useContactsStore.getState();
+    const { roomToEntity, refreshEntity, refreshComments, refreshFiles } =
+      useEntityStore.getState();
 
-    if (type === EVENT_TYPE_CONTACT_UPDATE) {
-      const contactId = roomToContact[roomId];
-      if (contactId) {
-        refreshContact(client, roomId);
-      } else {
-        // Decryption finished before hydrateFromMatrix populated roomToContact.
-        // Schedule hydration so this event is not permanently missed.
-        scheduleHydrate(client);
-      }
+    const ref = roomToEntity[roomId];
+    if (!ref) {
+      // Decryption finished before hydrateFromMatrix populated roomToEntity.
+      scheduleHydrate(client);
+      return;
     }
 
-    if (type === EVENT_TYPE_COMMENT) {
-      const contactId = roomToContact[roomId];
-      if (contactId) refreshComments(client, roomId);
+    let config;
+    try {
+      config = getEntityConfig(ref.type);
+    } catch {
+      return;
     }
 
-    if (type === EVENT_TYPE_CONTACT_FILE) {
-      const contactId = roomToContact[roomId];
-      if (contactId) refreshFiles(client, roomId);
+    const updateEventType = `${config.eventTypePrefix}.update`;
+    const fileEventType = `${config.eventTypePrefix}.file`;
+
+    if (type === updateEventType) {
+      refreshEntity(client, config, roomId);
+    } else if (type === "m.room.message") {
+      refreshComments(client, roomId);
+    } else if (type === fileEventType) {
+      refreshFiles(client, config, roomId);
     }
   };
 
   const onAccountData = (event: MatrixEvent) => {
-    if (event.getType() === INDEX_EVENT_TYPE) {
-      scheduleHydrate(client);
+    const eventType = event.getType();
+    // Re-hydrate if any entity index changes
+    for (const config of getAllEntityConfigs()) {
+      if (eventType === `${config.eventTypePrefix}_index`) {
+        scheduleHydrate(client);
+        return;
+      }
     }
   };
 
-  // ─── Re-send contact snapshot when a new member joins the data room ───────
-  //
-  // WHY THIS IS NEEDED:
-  // Contact data is stored as encrypted Megolm events in the room timeline.
-  // When a new member joins, they receive the historical ciphertext from the
-  // homeserver but *cannot decrypt it* — they don't have the Megolm session
-  // keys that were in use before they joined.
-  //
-  // Sending a fresh contact.update event immediately after they join solves
-  // this: the new event uses a new Megolm session that includes the new
-  // member's device, so they can decrypt it right away.
-  //
-  // Debounced 2s per room:member pair to avoid bursts on rapid membership
-  // events (e.g. invite → join sequences).
+  // Re-send entity snapshot when a new member joins the data room
   const pendingResends = new Map<string, ReturnType<typeof setTimeout>>();
 
-  const onMembership = (
-    _event: MatrixEvent,
-    member: RoomMember,
-  ) => {
-    // Handle current user being kicked or banned from a contact room
+  const onMembership = (_event: MatrixEvent, member: RoomMember) => {
+    // Handle current user being kicked or banned
     if (
       member.userId === client.getUserId() &&
       (member.membership === "leave" || member.membership === "ban")
     ) {
-      const { indexEntries, removeContact } = useContactsStore.getState();
-      const entry = indexEntries.find(
-        (e) => e.dataRoomId === member.roomId || e.commentsRoomId === member.roomId,
-      );
-      if (entry) {
-        removeContact(entry.contactId);
-        removeContactFromIndex(client, entry.contactId).catch(() => {});
+      const { indices, removeEntity } = useEntityStore.getState();
+      for (const config of getAllEntityConfigs()) {
+        const entries = indices[config.type] ?? [];
+        const entry = entries.find(
+          (e) =>
+            e.dataRoomId === member.roomId ||
+            e.commentsRoomId === member.roomId,
+        );
+        if (entry) {
+          removeEntity(config.type, entry.entityId);
+          removeEntityFromIndex(client, config, entry.entityId).catch(() => {});
+          return;
+        }
       }
       return;
     }
 
-    // When the current user is invited to a room, trigger hydration so
-    // hydrateFromMatrix can auto-join and re-add the contact to the store.
-    // This covers re-invites after a kick without waiting for the next
-    // 30-second SYNCING poll.
+    // When current user is invited, trigger hydration
     if (
       member.userId === client.getUserId() &&
       member.membership === "invite"
@@ -156,26 +151,41 @@ export function attachSyncListeners(client: MatrixClient): () => void {
     if (member.membership !== "join") return;
     if (member.userId === client.getUserId()) return;
 
-    const { indexEntries } = useContactsStore.getState();
+    const { indices } = useEntityStore.getState();
 
-    // Only trigger for data rooms (not comment rooms)
-    const entry = indexEntries.find((e) => e.dataRoomId === member.roomId);
-    if (!entry) return;
+    // Find which entity this data room belongs to
+    for (const config of getAllEntityConfigs()) {
+      const entries = indices[config.type] ?? [];
+      const entry = entries.find((e) => e.dataRoomId === member.roomId);
+      if (!entry) continue;
 
-    const key = `${member.roomId}:${member.userId}`;
-    const existing = pendingResends.get(key);
-    if (existing) clearTimeout(existing);
+      const key = `${member.roomId}:${member.userId}`;
+      const existing = pendingResends.get(key);
+      if (existing) clearTimeout(existing);
 
-    pendingResends.set(key, setTimeout(async () => {
-      pendingResends.delete(key);
-      const contact = useContactsStore.getState().contacts[entry.contactId];
-      if (!contact) return;
-      try {
-        await sendContactUpdate(client, entry.dataRoomId, contact);
-      } catch (err) {
-        console.warn("[matrix] re-send contact on member join failed:", err);
-      }
-    }, 2000));
+      pendingResends.set(
+        key,
+        setTimeout(async () => {
+          pendingResends.delete(key);
+          const entity =
+            useEntityStore.getState().entities[config.type]?.[entry.entityId];
+          if (!entity) return;
+          try {
+            await sendEntityUpdate(client, config, entry.dataRoomId, entity);
+          } catch (err) {
+            console.warn("[matrix] re-send entity on member join failed:", err);
+          }
+        }, 2000),
+      );
+
+      return; // found the room, no need to check other configs
+    }
+
+    // If room matches app prefix but not in any index, schedule hydration
+    const room = client.getRoom(member.roomId);
+    if (room?.name?.startsWith(APP_PREFIX)) {
+      scheduleHydrate(client);
+    }
   };
 
   client.on(ClientEvent.Sync, onSync);
@@ -184,7 +194,7 @@ export function attachSyncListeners(client: MatrixClient): () => void {
   client.on(ClientEvent.AccountData, onAccountData);
   client.on(RoomMemberEvent.Membership, onMembership);
 
-  // ─── Catch-up for missed PREPARED event ──────────────────────────────────
+  // Catch-up for missed PREPARED event
   const currentState = client.getSyncState();
   if (currentState === "PREPARED" || currentState === "SYNCING") {
     markReady(client, currentState);

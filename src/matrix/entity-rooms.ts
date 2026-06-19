@@ -1,7 +1,8 @@
 import type { MatrixClient } from "matrix-js-sdk";
-import { roomCommentsName, roomDataName } from "@/lib/constants";
+import { Preset } from "matrix-js-sdk";
+import type { EntityConfig } from "@/entities/types";
 
-export interface ContactRooms {
+export interface EntityRooms {
   dataRoomId: string;
   commentsRoomId: string;
 }
@@ -12,7 +13,7 @@ async function createEncryptedRoom(
 ): Promise<string> {
   const resp = await client.createRoom({
     name,
-    preset: "private_chat" as const,
+    preset: Preset.PrivateChat,
     initial_state: [
       {
         type: "m.room.encryption",
@@ -24,13 +25,19 @@ async function createEncryptedRoom(
   return resp.room_id;
 }
 
-export async function createContactRooms(
+export async function createEntityRooms(
   client: MatrixClient,
-  contactId: string,
-): Promise<ContactRooms> {
-  const dataRoomId = await createEncryptedRoom(client, roomDataName(contactId));
+  config: EntityConfig,
+  entityId: string,
+): Promise<EntityRooms> {
+  const dataRoomId = await createEncryptedRoom(
+    client,
+    config.roomNameFn(entityId),
+  );
   await new Promise((r) => setTimeout(r, 500));
-  const commentsRoomId = await createEncryptedRoom(client, roomCommentsName(contactId));
-
+  const commentsRoomId = await createEncryptedRoom(
+    client,
+    config.roomNameFn(entityId, "comments"),
+  );
   return { dataRoomId, commentsRoomId };
 }

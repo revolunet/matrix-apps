@@ -1,14 +1,13 @@
 import { useEffect } from "react";
 import { useAuthStore } from "@/stores/auth.store";
 import { useSyncStore } from "@/stores/sync.store";
-import { useContactsStore } from "@/stores/contacts.store";
+import { useEntityStore } from "@/stores/entity.store";
 import { attachSyncListeners } from "@/matrix/sync";
 
-export function useContactSync() {
+export function useEntitySync() {
   const client = useAuthStore((s) => s.client);
   const isReady = useSyncStore((s) => s.isReady);
-  const contacts = useContactsStore((s) => s.contacts);
-  const indexEntries = useContactsStore((s) => s.indexEntries);
+  const indices = useEntityStore((s) => s.indices);
 
   useEffect(() => {
     if (!client) return;
@@ -16,5 +15,5 @@ export function useContactSync() {
     return cleanup;
   }, [client]);
 
-  return { isReady, contacts, indexEntries };
+  return { isReady, indices };
 }

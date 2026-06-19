@@ -1,62 +1,70 @@
 import type { MatrixClient } from "matrix-js-sdk";
-import { EventType } from "matrix-js-sdk";
-import {
-  EVENT_TYPE_CONTACT_UPDATE,
-  EVENT_TYPE_CONTACT_FILE,
-} from "@/lib/constants";
-import { ContactSchema, type Contact } from "@/schemas/contact.schema";
+import type { EntityConfig } from "@/entities/types";
 import { CommentSchema, type Comment } from "@/schemas/comment.schema";
-import { ContactFileSchema, type ContactFile } from "@/schemas/file.schema";
+import { EntityFileSchema, type EntityFile } from "@/schemas/entity-file.schema";
 
-export async function sendContactUpdate(
+// The Matrix JS SDK v41 uses overloaded sendEvent/setAccountData signatures that
+// require event types to be members of its internal TimelineEvents / AccountDataEvents
+// unions. Our custom app event types are not in those unions, so we bypass the
+// generic overload resolution by casting through `unknown`.
+
+export async function sendEntityUpdate(
   client: MatrixClient,
+  config: EntityConfig,
   dataRoomId: string,
-  contact: Contact,
+  data: unknown,
 ): Promise<void> {
-  await client.sendEvent(dataRoomId, EVENT_TYPE_CONTACT_UPDATE as EventType, {
-    contact,
+  const eventType = `${config.eventTypePrefix}.update`;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  await (client as any).sendEvent(dataRoomId, eventType, {
+    entity: data,
     schema_version: 1,
   });
 }
 
-export async function sendComment(
+export function extractLatestEntity(
   client: MatrixClient,
-  commentsRoomId: string,
-  contactId: string,
-  body: string,
-): Promise<void> {
-  await client.sendEvent(commentsRoomId, "m.room.message" as EventType, {
-    msgtype: "m.text",
-    body,
-    contact_id: contactId,
-  });
-}
-
-export function extractLatestContact(
-  client: MatrixClient,
+  config: EntityConfig,
   dataRoomId: string,
-): Contact | null {
+): unknown | null {
   const room = client.getRoom(dataRoomId);
   if (!room) return null;
 
+  const updateEventType = `${config.eventTypePrefix}.update`;
   const events = room.getLiveTimeline().getEvents();
   for (let i = events.length - 1; i >= 0; i--) {
     const event = events[i];
-    if (event.getType() !== EVENT_TYPE_CONTACT_UPDATE) continue;
+    if (event.getType() !== updateEventType) continue;
     if (event.isBeingDecrypted() || event.isDecryptionFailure()) continue;
     const content = event.getContent();
-    if (!content?.contact) continue;
-    const parsed = ContactSchema.safeParse(content.contact);
+    // Support both new format ({ entity: ... }) and old contact format ({ contact: ... })
+    const payload = content?.entity ?? content?.contact;
+    if (!payload) continue;
+    const parsed = config.schema.safeParse(payload);
     if (parsed.success) return parsed.data;
   }
 
   return null;
 }
 
+export async function sendComment(
+  client: MatrixClient,
+  commentsRoomId: string,
+  entityId: string,
+  body: string,
+): Promise<void> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  await (client as any).sendEvent(commentsRoomId, "m.room.message", {
+    msgtype: "m.text",
+    body,
+    entity_id: entityId,
+  });
+}
+
 export function extractComments(
   client: MatrixClient,
   commentsRoomId: string,
-  fallbackContactId?: string,
+  fallbackEntityId?: string,
 ): Comment[] {
   const room = client.getRoom(commentsRoomId);
   if (!room) return [];
@@ -71,7 +79,8 @@ export function extractComments(
     if (content?.msgtype !== "m.text") continue;
     const parsed = CommentSchema.safeParse({
       id: event.getId(),
-      contactId: content.contact_id ?? fallbackContactId,
+      contactId:
+        content.entity_id ?? content.contact_id ?? fallbackEntityId,
       authorId: event.getSender(),
       body: content.body,
       createdAt: new Date(event.getTs()).toISOString(),
@@ -82,15 +91,18 @@ export function extractComments(
   return comments;
 }
 
-export async function sendContactFile(
+export async function sendEntityFile(
   client: MatrixClient,
+  config: EntityConfig,
   dataRoomId: string,
-  contactId: string,
+  entityId: string,
   file: File,
 ): Promise<void> {
   const { content_uri: mxcUri } = await client.uploadContent(file);
-  await client.sendEvent(dataRoomId, EVENT_TYPE_CONTACT_FILE as EventType, {
-    contact_id: contactId,
+  const fileEventType = `${config.eventTypePrefix}.file`;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  await (client as any).sendEvent(dataRoomId, fileEventType, {
+    entity_id: entityId,
     filename: file.name,
     mxc_uri: mxcUri,
     mimetype: file.type || "application/octet-stream",
@@ -100,18 +112,20 @@ export async function sendContactFile(
 
 export function extractFiles(
   client: MatrixClient,
+  config: EntityConfig,
   dataRoomId: string,
-): ContactFile[] {
+): EntityFile[] {
   const room = client.getRoom(dataRoomId);
   if (!room) return [];
-  const files: ContactFile[] = [];
+  const fileEventType = `${config.eventTypePrefix}.file`;
+  const files: EntityFile[] = [];
   for (const event of room.getLiveTimeline().getEvents()) {
-    if (event.getType() !== EVENT_TYPE_CONTACT_FILE) continue;
+    if (event.getType() !== fileEventType) continue;
     if (event.isBeingDecrypted() || event.isDecryptionFailure()) continue;
     const c = event.getContent();
-    const parsed = ContactFileSchema.safeParse({
+    const parsed = EntityFileSchema.safeParse({
       id: event.getId(),
-      contactId: c.contact_id,
+      entityId: c.entity_id ?? c.contact_id,
       authorId: event.getSender(),
       filename: c.filename,
       mxcUri: c.mxc_uri,

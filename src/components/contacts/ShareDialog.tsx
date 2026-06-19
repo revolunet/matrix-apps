@@ -2,13 +2,15 @@ import { useRef, useState } from "react";
 import { useShareContact } from "@/hooks/useShareContact";
 
 interface Props {
-  contactId: string;
+  entityId: string;
+  dataRoomId?: string;
+  commentsRoomId?: string;
 }
 
-export function ShareDialog({ contactId }: Props) {
+export function ShareDialog({ dataRoomId, commentsRoomId }: Props) {
   const dialogRef = useRef<HTMLDialogElement>(null);
   const [matrixUserId, setMatrixUserId] = useState("");
-  const { shareWith, sharing, error } = useShareContact(contactId);
+  const { shareWith, sharing, error } = useShareContact(dataRoomId, commentsRoomId);
   const [success, setSuccess] = useState(false);
 
   const open = () => {
@@ -42,7 +44,7 @@ export function ShareDialog({ contactId }: Props) {
         ref={dialogRef}
         className="rounded-lg p-6 w-full max-w-sm shadow-lg backdrop:bg-black/40"
       >
-        <h2 className="text-base font-semibold mb-4">Share Contact</h2>
+        <h2 className="text-base font-semibold mb-4">Share</h2>
 
         {success ? (
           <div className="space-y-4">
