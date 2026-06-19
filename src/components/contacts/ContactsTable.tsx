@@ -15,7 +15,18 @@ const columnHelper = createColumnHelper<Contact>();
 const columns = [
   columnHelper.accessor("fullname", {
     header: "Full Name",
-    cell: (info) => info.getValue(),
+    cell: (info) => {
+      const color = info.row.original.preferred_color;
+      return (
+        <span className="flex items-center gap-2">
+          <span
+            className="inline-block w-3 h-3 rounded-full flex-shrink-0"
+            style={{ backgroundColor: color ?? "#d1d5db" }}
+          />
+          {info.getValue()}
+        </span>
+      );
+    },
   }),
   columnHelper.accessor("email", {
     header: "Email",

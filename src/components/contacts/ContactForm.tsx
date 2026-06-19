@@ -75,6 +75,34 @@ export function ContactForm({
         )}
       </div>
 
+      <div>
+        <label className="block text-sm font-medium text-gray-700 mb-1">
+          Birthdate
+        </label>
+        <input
+          {...register("birthdate")}
+          type="date"
+          className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:border-blue-500"
+        />
+        {errors.birthdate && (
+          <p className="text-red-500 text-xs mt-1">{errors.birthdate.message}</p>
+        )}
+      </div>
+
+      <div>
+        <label className="block text-sm font-medium text-gray-700 mb-1">
+          Preferred Color
+        </label>
+        <input
+          {...register("preferred_color")}
+          type="color"
+          className="h-9 w-16 border border-gray-300 rounded px-1 py-1 cursor-pointer"
+        />
+        {errors.preferred_color && (
+          <p className="text-red-500 text-xs mt-1">{errors.preferred_color.message}</p>
+        )}
+      </div>
+
       <button
         type="submit"
         disabled={isSubmitting}

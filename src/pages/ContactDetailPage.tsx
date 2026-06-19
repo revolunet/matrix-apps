@@ -3,6 +3,7 @@ import { useContactsStore } from "@/stores/contacts.store";
 import { useMatrixClient } from "@/hooks/useMatrixClient";
 import { ContactForm } from "@/components/contacts/ContactForm";
 import { CommentsFeed } from "@/components/comments/CommentsFeed";
+import { FileDropZone } from "@/components/contacts/FileDropZone";
 import { ShareDialog } from "@/components/contacts/ShareDialog";
 import { SharedWithList } from "@/components/contacts/SharedWithList";
 import { sendContactUpdate } from "@/matrix/events";
@@ -98,6 +99,8 @@ export function ContactDetailPage() {
               fullname: contact.fullname,
               email: contact.email,
               gender: contact.gender,
+              birthdate: contact.birthdate,
+              preferred_color: contact.preferred_color,
             }}
             onSubmit={handleUpdate}
             submitLabel="Update Contact"
@@ -114,6 +117,16 @@ export function ContactDetailPage() {
           dataRoomId={(contact?.dataRoomId ?? indexEntry?.dataRoomId)!}
           commentsRoomId={(contact?.commentsRoomId ?? indexEntry?.commentsRoomId)!}
         />
+      )}
+
+      {(contact?.dataRoomId ?? indexEntry?.dataRoomId) && (
+        <section>
+          <h2 className="text-sm font-semibold text-gray-700 mb-3">Documents</h2>
+          <FileDropZone
+            contactId={contactId}
+            dataRoomId={(contact?.dataRoomId ?? indexEntry?.dataRoomId)!}
+          />
+        </section>
       )}
 
       <section>

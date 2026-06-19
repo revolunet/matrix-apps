@@ -1,6 +1,6 @@
 # Matrix CMS Prototype
 
-A greenfield React + TypeScript SPA that uses the **Matrix protocol** as a fully end-to-end-encrypted backend for a contacts CRM. Contacts, edits, and per-contact comment feeds are stored in encrypted Matrix rooms. Real-time sync and sharing between Matrix users is built-in.
+A greenfield React + TypeScript SPA that uses the **Matrix protocol** as a fully end-to-end-encrypted backend for a contacts CRM. Contacts, edits, per-contact comment feeds, and file attachments are stored in encrypted Matrix rooms. Real-time sync and sharing between Matrix users is built-in.
 
 **No backend server.** Vite builds static files. All server concerns are handled by the Matrix homeserver (defaults to `matrix.org`).
 
@@ -36,6 +36,7 @@ Login → createMatrixClient → initRustCrypto → bootstrapSecretStorage
 - Each contact gets **two encrypted Matrix rooms**: a `data` room and a `comments` room.
 - Contact data is written as **full snapshots** in regular timeline events (`org.demo-e2e-app.contact.update`). The most recent event is the current state. This is required because Matrix state events cannot be E2E encrypted.
 - Comments are regular timeline events (`org.demo-e2e-app.contact.comment`) in the comments room.
+- File attachments are stored as timeline events (`org.demo-e2e-app.contact.file`) in the **data room**. Each event records the filename, MIME type, size, and an `mxc://` URI pointing to the uploaded bytes on the homeserver media repository. The event content is Megolm-encrypted; the raw file bytes are uploaded unencrypted (acceptable for this prototype).
 - The **contact index** is stored in `account_data` (`org.demo-e2e-app.contact_index`) — syncs across devices automatically. Not E2E encrypted (stores only room IDs and display names, not sensitive contact data).
 
 ### Directory layout
@@ -43,11 +44,11 @@ Login → createMatrixClient → initRustCrypto → bootstrapSecretStorage
 ```
 src/
 ├── lib/          constants.ts, utils.ts
-├── schemas/      contact, comment, index (Zod)
+├── schemas/      contact, comment, file, index (Zod)
 ├── matrix/       client, auth, rooms, events, index-room, sync
 ├── stores/       auth, contacts, sync (Zustand)
 ├── hooks/        useMatrixClient, useContactSync, useShareContact
-├── components/   layout/, contacts/, comments/
+├── components/   layout/, contacts/ (incl. FileDropZone), comments/
 └── pages/        LoginPage, ContactsPage, NewContactPage, ContactDetailPage
 ```
 
@@ -79,7 +80,8 @@ Output is in `dist/` — deploy to any static host (Netlify, GitHub Pages, Cloud
 - Create contact — auto-creates two encrypted rooms, writes first snapshot event
 - Edit contact — sends a new full snapshot event (history preserved in room timeline)
 - Comments feed — real-time via Matrix timeline events, auto-scrolls to bottom
-- Share contact — invite another Matrix user to both rooms; invitee auto-joins on next sync
+- Documents — drag-and-drop (or click-to-browse) file uploads per contact; files are uploaded to the Matrix media repo and metadata stored as encrypted timeline events in the data room; clickable download links restored from room timeline on reload
+- Share contact — invite another Matrix user to both rooms; invitee auto-joins on next sync and sees the full file list
 - Real-time sync — open two tabs, changes propagate via Matrix sync loop
 - E2E encryption — all contact data and comments encrypted via Megolm
 
@@ -119,6 +121,8 @@ Missing pieces needed before real-world use:
 - **WASM bundle size** — the `@matrix-org/matrix-sdk-crypto-wasm` WASM blob is ~5.5 MB (1.9 MB gzipped). This is unavoidable with the Rust crypto backend. Serve with long-lived cache headers and consider a CDN.
 
 - **`localStorage` token storage** — Matrix access tokens are stored in `localStorage`, accessible to any JS on the same origin. Do not co-host this app with untrusted third-party scripts.
+
+- **File uploads are not E2E encrypted** — `client.uploadContent()` sends raw bytes to the homeserver media repository without client-side encryption. The file metadata (filename, size, `mxc://` URI) is stored in an encrypted room event, but the file content itself is accessible to the homeserver operator via the media API. Use Matrix's encrypted attachment spec (`EncryptedFile` content) if confidentiality of file bytes is required.
 
 - **`vite-plugin-top-level-await` not used** — the original plan included this plugin, but it is incompatible with Vite 8 (peer-requires a CJS-accessible `rollup`/`esbuild`, which Vite 8 no longer exposes this way). Vite 8 with `build.target: "esnext"` handles top-level await natively; the plugin is not needed.
 

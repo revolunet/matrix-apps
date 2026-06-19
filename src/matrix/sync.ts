@@ -2,6 +2,7 @@ import type { MatrixClient, MatrixEvent, Room, RoomMember } from "matrix-js-sdk"
 import { ClientEvent, MatrixEventEvent, RoomEvent, RoomMemberEvent } from "matrix-js-sdk";
 import {
   EVENT_TYPE_COMMENT,
+  EVENT_TYPE_CONTACT_FILE,
   EVENT_TYPE_CONTACT_UPDATE,
 } from "@/lib/constants";
 import { INDEX_EVENT_TYPE } from "@/schemas/index.schema";
@@ -23,8 +24,12 @@ function markReady(client: MatrixClient, state: string) {
   useSyncStore.getState().setSyncState(state);
   if (!useSyncStore.getState().isReady) {
     useSyncStore.getState().setReady(true);
-    scheduleHydrate(client);
   }
+  // Always (re)schedule hydration — it is idempotent and debounced, so
+  // running it again on every SYNCING event (~30 s) is harmless. This
+  // ensures we recover if the first attempt ran before decryption finished
+  // or if isReady was already true from a previous session in the same tab.
+  scheduleHydrate(client);
 }
 
 export function attachSyncListeners(client: MatrixClient): () => void {
@@ -44,7 +49,7 @@ export function attachSyncListeners(client: MatrixClient): () => void {
     if (!room) return;
 
     const type = event.getType();
-    const { roomToContact, refreshContact, refreshComments } =
+    const { roomToContact, refreshContact, refreshComments, refreshFiles } =
       useContactsStore.getState();
 
     if (type === EVENT_TYPE_CONTACT_UPDATE) {
@@ -56,6 +61,11 @@ export function attachSyncListeners(client: MatrixClient): () => void {
       const contactId = roomToContact[room.roomId];
       if (contactId) refreshComments(client, room.roomId);
     }
+
+    if (type === EVENT_TYPE_CONTACT_FILE) {
+      const contactId = roomToContact[room.roomId];
+      if (contactId) refreshFiles(client, room.roomId);
+    }
   };
 
   const onDecrypted = (event: MatrixEvent) => {
@@ -63,17 +73,28 @@ export function attachSyncListeners(client: MatrixClient): () => void {
     const roomId = event.getRoomId();
     if (!roomId) return;
 
-    const { roomToContact, refreshContact, refreshComments } =
+    const { roomToContact, refreshContact, refreshComments, refreshFiles } =
       useContactsStore.getState();
 
     if (type === EVENT_TYPE_CONTACT_UPDATE) {
       const contactId = roomToContact[roomId];
-      if (contactId) refreshContact(client, roomId);
+      if (contactId) {
+        refreshContact(client, roomId);
+      } else {
+        // Decryption finished before hydrateFromMatrix populated roomToContact.
+        // Schedule hydration so this event is not permanently missed.
+        scheduleHydrate(client);
+      }
     }
 
     if (type === EVENT_TYPE_COMMENT) {
       const contactId = roomToContact[roomId];
       if (contactId) refreshComments(client, roomId);
+    }
+
+    if (type === EVENT_TYPE_CONTACT_FILE) {
+      const contactId = roomToContact[roomId];
+      if (contactId) refreshFiles(client, roomId);
     }
   };
 

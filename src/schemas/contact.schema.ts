@@ -14,6 +14,8 @@ export const ContactSchema = z.object({
   fullname: z.string().min(1, "Full name is required"),
   email: z.string().email("Invalid email address"),
   gender: GenderEnum,
+  birthdate: z.string().optional(),        // ISO date string (YYYY-MM-DD), optional
+  preferred_color: z.string().optional(),  // CSS hex color, optional
   createdAt: z.string().datetime(),
   createdBy: z.string().optional(), // Matrix userId of the creator
   updatedAt: z.string().datetime(),

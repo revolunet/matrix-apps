@@ -9,10 +9,10 @@ import {
 
 export function loadContactIndex(client: MatrixClient): ContactIndex {
   const event = client.getAccountData(INDEX_EVENT_TYPE);
-  if (!event) return { ...EMPTY_INDEX };
+  if (!event) return { ...EMPTY_INDEX, contacts: [] };
 
   const parsed = ContactIndexSchema.safeParse(event.getContent());
-  if (!parsed.success) return { ...EMPTY_INDEX };
+  if (!parsed.success) return { ...EMPTY_INDEX, contacts: [] };
   return parsed.data;
 }
 
@@ -29,13 +29,12 @@ export async function addContactToIndex(
   entry: IndexEntry,
 ): Promise<void> {
   const index = loadContactIndex(client);
-  const existing = index.contacts.findIndex(
-    (c) => c.contactId === entry.contactId,
-  );
+  const contacts = [...index.contacts];
+  const existing = contacts.findIndex((c) => c.contactId === entry.contactId);
   if (existing >= 0) {
-    index.contacts[existing] = entry;
+    contacts[existing] = entry;
   } else {
-    index.contacts.push(entry);
+    contacts.push(entry);
   }
-  await saveContactIndex(client, index);
+  await saveContactIndex(client, { ...index, contacts });
 }
