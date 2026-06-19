@@ -1,7 +1,6 @@
 import type { MatrixClient, MatrixEvent, Room, RoomMember } from "matrix-js-sdk";
 import { ClientEvent, MatrixEventEvent, RoomEvent, RoomMemberEvent } from "matrix-js-sdk";
 import {
-  EVENT_TYPE_COMMENT,
   EVENT_TYPE_CONTACT_FILE,
   EVENT_TYPE_CONTACT_UPDATE,
 } from "@/lib/constants";
@@ -58,7 +57,7 @@ export function attachSyncListeners(client: MatrixClient): () => void {
       if (contactId) refreshContact(client, room.roomId);
     }
 
-    if (type === EVENT_TYPE_COMMENT) {
+    if (type === "m.room.message") {
       const contactId = roomToContact[room.roomId];
       if (contactId) refreshComments(client, room.roomId);
     }

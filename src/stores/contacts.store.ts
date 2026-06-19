@@ -151,7 +151,7 @@ export const useContactsStore = create<ContactsState>()(
     refreshComments: (client, commentsRoomId) => {
       const contactId = get().roomToContact[commentsRoomId];
       if (!contactId) return;
-      const comments = extractComments(client, commentsRoomId);
+      const comments = extractComments(client, commentsRoomId, contactId);
       set((state) => {
         state.comments[contactId] = comments;
       });

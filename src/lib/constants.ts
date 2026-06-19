@@ -17,7 +17,6 @@ export function setHomeserverUrl(url: string): void {
 export const APP_PREFIX = "demo-e2e-app";
 
 export const EVENT_TYPE_CONTACT_UPDATE = "org.demo-e2e-app.contact.update";
-export const EVENT_TYPE_COMMENT = "org.demo-e2e-app.contact.comment";
 export const EVENT_TYPE_CONTACT_FILE = "org.demo-e2e-app.contact.file";
 
 export const roomDataName = (contactId: string) =>

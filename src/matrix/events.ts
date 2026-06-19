@@ -1,7 +1,6 @@
 import type { MatrixClient } from "matrix-js-sdk";
 import { EventType } from "matrix-js-sdk";
 import {
-  EVENT_TYPE_COMMENT,
   EVENT_TYPE_CONTACT_UPDATE,
   EVENT_TYPE_CONTACT_FILE,
 } from "@/lib/constants";
@@ -26,9 +25,10 @@ export async function sendComment(
   contactId: string,
   body: string,
 ): Promise<void> {
-  await client.sendEvent(commentsRoomId, EVENT_TYPE_COMMENT as EventType, {
-    contact_id: contactId,
+  await client.sendEvent(commentsRoomId, "m.room.message" as EventType, {
+    msgtype: "m.text",
     body,
+    contact_id: contactId,
   });
 }
 
@@ -56,6 +56,7 @@ export function extractLatestContact(
 export function extractComments(
   client: MatrixClient,
   commentsRoomId: string,
+  fallbackContactId?: string,
 ): Comment[] {
   const room = client.getRoom(commentsRoomId);
   if (!room) return [];
@@ -64,12 +65,13 @@ export function extractComments(
   const comments: Comment[] = [];
 
   for (const event of events) {
-    if (event.getType() !== EVENT_TYPE_COMMENT) continue;
+    if (event.getType() !== "m.room.message") continue;
     if (event.isBeingDecrypted() || event.isDecryptionFailure()) continue;
     const content = event.getContent();
+    if (content?.msgtype !== "m.text") continue;
     const parsed = CommentSchema.safeParse({
       id: event.getId(),
-      contactId: content.contact_id,
+      contactId: content.contact_id ?? fallbackContactId,
       authorId: event.getSender(),
       body: content.body,
       createdAt: new Date(event.getTs()).toISOString(),
