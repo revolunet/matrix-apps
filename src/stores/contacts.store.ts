@@ -5,7 +5,7 @@ import type { Contact } from "@/schemas/contact.schema";
 import type { Comment } from "@/schemas/comment.schema";
 import type { ContactFile } from "@/schemas/file.schema";
 import type { IndexEntry } from "@/schemas/index.schema";
-import { loadContactIndex, addContactToIndex } from "@/matrix/index-room";
+import { loadContactIndex, addContactToIndex, removeContactFromIndex } from "@/matrix/index-room";
 import {
   extractComments,
   extractFiles,
@@ -39,6 +39,19 @@ export const useContactsStore = create<ContactsState>()(
 
     hydrateFromMatrix: async (client) => {
       const index = loadContactIndex(client);
+
+      // Filter out entries where the user is no longer a member of the data
+      // room — handles the offline-kick case (kicked while tab was closed).
+      const stale: typeof index.contacts = [];
+      index.contacts = index.contacts.filter((entry) => {
+        const membership = client.getRoom(entry.dataRoomId)?.getMyMembership();
+        if (membership === "join" || membership === "invite") return true;
+        stale.push(entry);
+        return false;
+      });
+      for (const entry of stale) {
+        await removeContactFromIndex(client, entry.contactId).catch(() => {});
+      }
 
       set((state) => {
         state.indexEntries = index.contacts;

@@ -38,3 +38,12 @@ export async function addContactToIndex(
   }
   await saveContactIndex(client, { ...index, contacts });
 }
+
+export async function removeContactFromIndex(
+  client: MatrixClient,
+  contactId: string,
+): Promise<void> {
+  const index = loadContactIndex(client);
+  const contacts = index.contacts.filter((c) => c.contactId !== contactId);
+  await saveContactIndex(client, { ...index, contacts });
+}

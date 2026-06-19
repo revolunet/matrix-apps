@@ -9,6 +9,7 @@ import { INDEX_EVENT_TYPE } from "@/schemas/index.schema";
 import { useSyncStore } from "@/stores/sync.store";
 import { useContactsStore } from "@/stores/contacts.store";
 import { sendContactUpdate } from "@/matrix/events";
+import { removeContactFromIndex } from "@/matrix/index-room";
 
 let hydrateTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -124,6 +125,22 @@ export function attachSyncListeners(client: MatrixClient): () => void {
     _event: MatrixEvent,
     member: RoomMember,
   ) => {
+    // Handle current user being kicked or banned from a contact room
+    if (
+      member.userId === client.getUserId() &&
+      (member.membership === "leave" || member.membership === "ban")
+    ) {
+      const { indexEntries, removeContact } = useContactsStore.getState();
+      const entry = indexEntries.find(
+        (e) => e.dataRoomId === member.roomId || e.commentsRoomId === member.roomId,
+      );
+      if (entry) {
+        removeContact(entry.contactId);
+        removeContactFromIndex(client, entry.contactId).catch(() => {});
+      }
+      return;
+    }
+
     // Only act on join events from other users
     if (member.membership !== "join") return;
     if (member.userId === client.getUserId()) return;
