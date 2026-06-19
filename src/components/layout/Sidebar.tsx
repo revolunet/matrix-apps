@@ -9,19 +9,9 @@ export function Sidebar() {
       <nav className="flex flex-col gap-1 p-2">
         <NavLink
           to="/contacts"
-          className={({ isActive }) =>
-            `text-sm font-medium px-3 py-2 rounded hover:underline ${isActive ? "text-black font-semibold" : "text-gray-600"}`
-          }
+          className="text-sm font-medium px-3 py-2 rounded hover:underline text-black font-semibold"
         >
           Contacts
-        </NavLink>
-        <NavLink
-          to="/contacts/new"
-          className={({ isActive }) =>
-            `text-sm font-medium px-3 py-2 rounded hover:underline ${isActive ? "text-black font-semibold" : "text-gray-600"}`
-          }
-        >
-          New Contact
         </NavLink>
       </nav>
     </aside>

@@ -141,6 +141,18 @@ export function attachSyncListeners(client: MatrixClient): () => void {
       return;
     }
 
+    // When the current user is invited to a room, trigger hydration so
+    // hydrateFromMatrix can auto-join and re-add the contact to the store.
+    // This covers re-invites after a kick without waiting for the next
+    // 30-second SYNCING poll.
+    if (
+      member.userId === client.getUserId() &&
+      member.membership === "invite"
+    ) {
+      scheduleHydrate(client);
+      return;
+    }
+
     // Only act on join events from other users
     if (member.membership !== "join") return;
     if (member.userId === client.getUserId()) return;

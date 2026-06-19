@@ -1,5 +1,6 @@
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { AppLayout } from "@/components/layout/AppLayout";
+import { ContactsLayout } from "@/components/layout/ContactsLayout";
 import { LoginPage } from "@/pages/LoginPage";
 import { ContactsPage } from "@/pages/ContactsPage";
 import { NewContactPage } from "@/pages/NewContactPage";
@@ -38,9 +39,11 @@ function App() {
         <Route path="/login" element={<LoginPage />} />
         <Route element={<AppLayout />}>
           <Route index element={<Navigate to="/contacts" replace />} />
-          <Route path="/contacts" element={<ContactsPage />} />
-          <Route path="/contacts/new" element={<NewContactPage />} />
-          <Route path="/contacts/:contactId" element={<ContactDetailPage />} />
+          <Route element={<ContactsLayout />}>
+            <Route path="/contacts" element={<ContactsPage />} />
+            <Route path="/contacts/new" element={<NewContactPage />} />
+            <Route path="/contacts/:contactId" element={<ContactDetailPage />} />
+          </Route>
         </Route>
         <Route path="*" element={<Navigate to="/contacts" replace />} />
       </Routes>

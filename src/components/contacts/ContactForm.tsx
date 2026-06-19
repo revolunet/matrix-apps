@@ -125,7 +125,7 @@ export function ContactForm({
     <form onSubmit={handleSubmit(onSubmit)} className="space-y-4 max-w-md">
       {/* Avatar */}
       <div className="flex items-center gap-4">
-        <div className="w-16 h-16 rounded-full overflow-hidden bg-gray-200 shrink-0 flex items-center justify-center">
+        <div className="w-24 h-24 rounded-full overflow-hidden bg-gray-200 shrink-0 flex items-center justify-center">
           {previewBlobUrl ? (
             <img
               src={previewBlobUrl}
@@ -134,7 +134,7 @@ export function ContactForm({
             />
           ) : (
             <svg
-              className="w-8 h-8 text-gray-400"
+              className="w-12 h-12 text-gray-400"
               xmlns="http://www.w3.org/2000/svg"
               viewBox="0 0 24 24"
               fill="currentColor"

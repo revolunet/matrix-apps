@@ -1,4 +1,4 @@
-import { useParams, useNavigate } from "react-router-dom";
+import { useParams } from "react-router-dom";
 import { useContactsStore } from "@/stores/contacts.store";
 import { useMatrixClient } from "@/hooks/useMatrixClient";
 import { ContactForm } from "@/components/contacts/ContactForm";
@@ -12,7 +12,6 @@ import type { ContactFormData } from "@/schemas/contact.schema";
 
 export function ContactDetailPage() {
   const { contactId } = useParams<{ contactId: string }>();
-  const navigate = useNavigate();
   const client = useMatrixClient();
   const contacts = useContactsStore((s) => s.contacts);
   const comments = useContactsStore((s) => s.comments);
@@ -27,15 +26,7 @@ export function ContactDetailPage() {
 
   if (!contact && !indexEntry) {
     return (
-      <div className="text-sm text-gray-500 py-8">
-        Contact not found.{" "}
-        <button
-          onClick={() => navigate("/contacts")}
-          className="underline text-blue-600"
-        >
-          Back to contacts
-        </button>
-      </div>
+      <div className="text-sm text-gray-500 py-8">Contact not found.</div>
     );
   }
 
@@ -62,12 +53,6 @@ export function ContactDetailPage() {
     <div className="space-y-8">
       <div className="flex items-center justify-between">
         <div>
-          <button
-            onClick={() => navigate("/contacts")}
-            className="text-sm text-gray-500 hover:text-black mb-2 block"
-          >
-            ← Back
-          </button>
           <h1 className="text-lg font-semibold text-gray-900">
             {contact?.fullname ?? indexEntry?.displayName ?? "Contact"}
           </h1>
@@ -95,6 +80,7 @@ export function ContactDetailPage() {
             Edit Contact
           </h2>
           <ContactForm
+            key={contactId}
             defaultValues={{
               fullname: contact.fullname,
               email: contact.email,

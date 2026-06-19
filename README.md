@@ -48,7 +48,7 @@ src/
 ├── matrix/       client, auth, rooms, events, index-room, sync
 ├── stores/       auth, contacts, sync (Zustand)
 ├── hooks/        useMatrixClient, useContactSync, useShareContact
-├── components/   layout/, contacts/ (incl. FileDropZone), comments/
+├── components/   layout/ (AppLayout, ContactsLayout, Sidebar, Header), contacts/ (incl. ContactsList, FileDropZone), comments/
 └── pages/        LoginPage, ContactsPage, NewContactPage, ContactDetailPage
 ```
 
@@ -76,7 +76,7 @@ Output is in `dist/` — deploy to any static host (Netlify, GitHub Pages, Cloud
 ## Features
 
 - Login with Matrix username/password
-- List contacts in a sortable table (TanStack Table)
+- List/detail layout — persistent contact list on the left, detail panel on the right; selecting a contact navigates without leaving the list
 - Create contact — auto-creates two encrypted rooms, writes first snapshot event
 - Edit contact — sends a new full snapshot event (history preserved in room timeline)
 - Comments feed — real-time via Matrix timeline events, auto-scrolls to bottom
