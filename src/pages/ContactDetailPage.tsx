@@ -101,6 +101,7 @@ export function ContactDetailPage() {
               gender: contact.gender,
               birthdate: contact.birthdate,
               preferred_color: contact.preferred_color,
+              avatarMxcUri: contact.avatarMxcUri,
             }}
             onSubmit={handleUpdate}
             submitLabel="Update Contact"

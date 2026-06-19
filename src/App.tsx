@@ -6,7 +6,6 @@ import { NewContactPage } from "@/pages/NewContactPage";
 import { ContactDetailPage } from "@/pages/ContactDetailPage";
 import { useEffect } from "react";
 import { initializeSession } from "@/matrix/auth";
-import { attachSyncListeners } from "@/matrix/sync";
 import { useAuthStore } from "@/stores/auth.store";
 
 function SessionLoader() {
@@ -18,7 +17,6 @@ function SessionLoader() {
     initializeSession()
       .then((client) => {
         if (client) {
-          attachSyncListeners(client);
           const userId = client.getUserId() ?? "";
           const deviceId = client.getDeviceId() ?? "";
           setClient(client, userId, deviceId);

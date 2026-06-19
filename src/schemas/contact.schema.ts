@@ -16,6 +16,7 @@ export const ContactSchema = z.object({
   gender: GenderEnum,
   birthdate: z.string().optional(),        // ISO date string (YYYY-MM-DD), optional
   preferred_color: z.string().optional(),  // CSS hex color, optional
+  avatarMxcUri: z.string().optional(),     // mxc:// URI of uploaded avatar image
   createdAt: z.string().datetime(),
   createdBy: z.string().optional(), // Matrix userId of the creator
   updatedAt: z.string().datetime(),

@@ -16,7 +16,7 @@ function formatBytes(bytes: number): string {
 
 export function FileDropZone({ contactId, dataRoomId }: Props) {
   const client = useMatrixClient();
-  const files = useContactsStore((s) => s.files[contactId] ?? []);
+  const files = useContactsStore((s) => s.files[contactId]) ?? [];
   const inputRef = useRef<HTMLInputElement>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [uploading, setUploading] = useState<string[]>([]);
