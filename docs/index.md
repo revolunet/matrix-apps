@@ -1,6 +1,6 @@
 # proto-cms-matrix — Documentation
 
-A React 19 + TypeScript SPA prototype that uses the Matrix protocol as a fully E2E-encrypted backend for a Contacts CRM. There is no application server — all persistence lives in Matrix rooms and `account_data` on a homeserver.
+A React 19 + TypeScript SPA prototype that uses the Matrix protocol as a fully E2E-encrypted backend for a multi-entity CRM. There is no application server — all persistence lives in Matrix rooms and `account_data` on a homeserver.
 
 > **Prototype warning.** This codebase is not production-ready. Read [security.md](security.md) before storing real data or deploying publicly.
 
@@ -10,7 +10,7 @@ A React 19 + TypeScript SPA prototype that uses the Matrix protocol as a fully E
 
 | Document | Audience | Description |
 |---|---|---|
-| [architecture.md](architecture.md) | Backend / platform contributors | Why the system is structured this way: startup sequence, ADRs, event registry, state management, sync, crypto, sharing |
+| [architecture.md](architecture.md) | Backend / platform contributors | Why the system is structured this way: startup sequence, entity registry, ADRs, event registry, state management, sync, crypto, sharing |
 | [security.md](security.md) | Security reviewers, anyone deploying | Threat model, what is and is not encrypted, credential storage, known vulnerabilities |
 | [limitations.md](limitations.md) | Product / engineering | Tracked bugs (BUG-xx), missing features (LIMIT-xx), and scaling constraints |
 | [ux.md](ux.md) | Frontend contributors | Route tree, layout components, loading states, form patterns, file upload, share modal, accessibility |
@@ -22,18 +22,23 @@ A React 19 + TypeScript SPA prototype that uses the Matrix protocol as a fully E
 | Concern | File |
 |---|---|
 | App entry point & routes | `src/App.tsx` |
+| Entity type definitions | `src/entities/types.ts` |
+| Entity registry | `src/entities/registry.ts` |
+| Contact entity config | `src/entities/contact/config.ts` |
+| Company entity config | `src/entities/company/config.ts` |
+| Training entity config | `src/entities/training/config.ts` |
 | Matrix client lifecycle | `src/matrix/client.ts` |
 | Login / register / session restore | `src/matrix/auth.ts` |
-| Room creation (two rooms per contact) | `src/matrix/rooms.ts` |
-| Event read/write helpers | `src/matrix/events.ts` |
-| Contact index in `account_data` | `src/matrix/index-room.ts` |
+| Room creation (two rooms per entity) | `src/matrix/entity-rooms.ts` |
+| Event read/write helpers | `src/matrix/entity-events.ts` |
+| Entity index in `account_data` | `src/matrix/entity-index.ts` |
 | Sync listeners + debounce | `src/matrix/sync.ts` |
-| Contacts Zustand store | `src/stores/contacts.store.ts` |
+| Generic entity Zustand store | `src/stores/entity.store.ts` |
 | Auth Zustand store | `src/stores/auth.store.ts` |
 | Sync state Zustand store | `src/stores/sync.store.ts` |
-| Custom event type constants | `src/lib/constants.ts` |
-| Zod schemas | `src/schemas/` |
 | Share flow hook | `src/hooks/useShareContact.ts` |
+| Auto-generated entity form | `src/components/entity/EntityForm.tsx` |
+| Relation field picker | `src/components/entity/RelationField.tsx` |
 | File upload component | `src/components/contacts/FileDropZone.tsx` |
 | Verification banner | `src/components/verification/VerificationBanner.tsx` |
 

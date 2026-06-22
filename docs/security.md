@@ -1,13 +1,13 @@
 # Security
 
-> **Prototype disclaimer.** This codebase is explicitly not production-ready. It was built to validate the Matrix-as-backend architecture, not to protect real user data. The issues documented here are known and intentional trade-offs for a prototype. Do not store real contact data or deploy publicly without addressing every item in this document.
+> **Prototype disclaimer.** This codebase is explicitly not production-ready. It was built to validate the Matrix-as-backend architecture, not to protect real user data. The issues documented here are known and intentional trade-offs for a prototype. Do not store real data or deploy publicly without addressing every item in this document.
 
 ---
 
 ## Threat Model
 
 **In-scope (what the prototype attempts to protect against):**
-- Homeserver operator reading contact data, comments, or file metadata.
+- Homeserver operator reading entity data, comments, or file metadata.
 - A passive network observer reading messages in transit (TLS + Megolm cover this).
 
 **Out-of-scope (what the prototype does not protect against):**
@@ -22,11 +22,11 @@
 
 | Data | Encrypted | Mechanism | Accessible to homeserver? |
 |---|---|---|---|
-| Contact fields (fullname, email, gender, birthdate, preferred_color, avatarMxcUri) | Yes | Megolm (E2E) | No — ciphertext only |
+| Entity fields (contact, company, training data) | Yes | Megolm (E2E) | No — ciphertext only |
 | Comments (message body) | Yes | Megolm (E2E) | No — ciphertext only |
-| File metadata (filename, size, mimetype, mxc URI) | Yes | Megolm (E2E) in `contact.file` event | No — ciphertext only |
+| File metadata (filename, size, mimetype, mxc URI) | Yes | Megolm (E2E) in `<prefix>.file` event | No — ciphertext only |
 | **File bytes** | **No** | `client.uploadContent()` sends raw bytes | **Yes — plaintext on media server** |
-| Contact index (room IDs, display names) | No | `account_data` — Matrix spec does not encrypt this | **Yes — plaintext** |
+| Entity indices (room IDs, display names) | No | `account_data` — Matrix spec does not encrypt this | **Yes — plaintext** |
 | Access token | No | Stored in `sessionStorage` under `matrix_session` key | Exposed to any JS on origin (XSS risk) |
 | Recovery key | No | Stored in `sessionStorage["matrix_recovery_key"]` as base64 | Exposed to any JS on origin; lost on tab close |
 | Login password | No | Stored in `sessionStorage["matrix_login_password"]` for UIA | Exposed to any JS on origin; lingers after bootstrap |
@@ -109,12 +109,12 @@ See BUG-03 in [limitations.md](limitations.md) for the silent failure on matrix.
 
 ## File Upload Security
 
-**File:** `src/matrix/events.ts:85` — `sendContactFile()`
+**File:** `src/matrix/entity-events.ts:94` — `sendEntityFile()`
 
 ```typescript
 const { content_uri: mxcUri } = await client.uploadContent(file);
-await client.sendEvent(dataRoomId, EVENT_TYPE_CONTACT_FILE as EventType, {
-  contact_id: contactId,
+await (client as any).sendEvent(dataRoomId, fileEventType, {
+  entity_id: entityId,
   filename: file.name,
   mxc_uri: mxcUri,
   mimetype: file.type || "application/octet-stream",
@@ -124,7 +124,7 @@ await client.sendEvent(dataRoomId, EVENT_TYPE_CONTACT_FILE as EventType, {
 
 `client.uploadContent()` sends the raw file bytes to the homeserver media repository (`/_matrix/media/v3/upload`) without client-side encryption. The homeserver stores the file in plaintext and serves it via the media API to any client that knows the `mxc://` URI.
 
-The `contact.file` event that records the URI is Megolm-encrypted (only room members can read the URI), but once the URI is known, the file bytes are accessible to the homeserver operator and to any Matrix client that has the URI.
+The `<prefix>.file` event that records the URI is Megolm-encrypted (only room members can read the URI), but once the URI is known, the file bytes are accessible to the homeserver operator and to any Matrix client that has the URI.
 
 **Fix:** Use the Matrix encrypted attachment spec: encrypt the file bytes client-side with AES-CTR, upload the ciphertext, and store the decryption key inside the encrypted event content as an `EncryptedFile` object. This is what Element and other production Matrix clients do.
 
@@ -134,7 +134,7 @@ The `contact.file` event that records the URI is Megolm-encrypted (only room mem
 
 React StrictMode (enabled in `main.tsx`) double-invokes effects in development. `attachSyncListeners` is called once per effect execution, so in dev mode it may register duplicate listeners on the Matrix client during HMR cycles.
 
-The cleanup function returned by `attachSyncListeners` removes all registered listeners, so this is harmless in production. In development, it can cause duplicate store updates (a contact update triggers two `refreshContact` calls for the same room).
+The cleanup function returned by `attachSyncListeners` removes all registered listeners, so this is harmless in production. In development, it can cause duplicate store updates (an entity update triggers two refresh calls for the same room).
 
 See BUG-02 in [limitations.md](limitations.md).
 
@@ -142,13 +142,12 @@ See BUG-02 in [limitations.md](limitations.md).
 
 ## Error Boundaries and Silent Failures
 
-There are zero React error boundaries in the codebase. Errors thrown during rendering (e.g. a decryption failure that propagates into the UI, a null dereference in a component that expects a contact to exist) will crash the entire component tree without any user-visible message.
+There are zero React error boundaries in the codebase. Errors thrown during rendering (e.g. a decryption failure that propagates into the UI, a null dereference in a component that expects an entity to exist) will crash the entire component tree without any user-visible message.
 
 Additionally, several decryption failures are silently dropped:
 
-- `extractLatestContact` (`src/matrix/events.ts:46`) skips events where `event.isDecryptionFailure()` is true — no error is surfaced.
-- `extractComments` (`src/matrix/events.ts:69`) does the same.
-- `extractFiles` (`src/matrix/events.ts:110`) does the same.
-- BUG-01 (async-decrypted comments via `EVENT_TYPE_COMMENT` in `onDecrypted`) are silently dropped because the constant is not defined.
+- `extractLatestEntity` (`src/matrix/entity-events.ts:25`) skips events where `event.isDecryptionFailure()` is true — no error is surfaced.
+- `extractComments` (`src/matrix/entity-events.ts:64`) does the same.
+- `extractFiles` (`src/matrix/entity-events.ts:113`) does the same.
 
-A user who cannot decrypt messages receives an empty contact, empty comments, and empty file list — with no indication that decryption failed.
+A user who cannot decrypt messages receives empty entity data, empty comments, and an empty file list — with no indication that decryption failed.

@@ -9,13 +9,15 @@ Frontend contributor reference. Covers routing, layout, loading states, forms, f
 Defined in `src/App.tsx`.
 
 ```
-/login                    → LoginPage
-/                         → redirect to /contacts
-/contacts                 → AppLayout > ContactsLayout > ContactsPage
-/contacts/new             → AppLayout > ContactsLayout > NewContactPage
-/contacts/:contactId      → AppLayout > ContactsLayout > ContactDetailPage
-* (catch-all)             → redirect to /contacts
+/login                      → LoginPage
+/                           → redirect to /contacts
+/:entityType                → AppLayout > EntityLayout > EntityListPage
+/:entityType/new            → AppLayout > EntityLayout > NewEntityPage
+/:entityType/:entityId      → AppLayout > EntityLayout > EntityDetailPage
+* (catch-all)               → redirect to /contacts
 ```
+
+`entityType` is the `urlSegment` from the entity config (e.g. `contacts`, `companies`, `trainings`). Pages resolve the config via `getEntityConfigBySegment(entityType)` from the registry.
 
 ### Auth guard behaviour in `AppLayout`
 
@@ -40,11 +42,9 @@ The spinner on `"idle"` and `"loading"` prevents a flash-to-login on page reload
 | Component | File | Role |
 |---|---|---|
 | `AppLayout` | `src/components/layout/AppLayout.tsx` | Auth guard, top-level shell (Sidebar + Header + main), mounts VerificationBanner |
-| `ContactsLayout` | `src/components/layout/ContactsLayout.tsx` | Two-panel layout: left = scrollable contact list (w-60), right = `<Outlet>` detail/form |
-| `Sidebar` | `src/components/layout/Sidebar.tsx` | Left nav rail (w-48), app name, "Contacts" `NavLink` |
+| `EntityLayout` | `src/components/layout/EntityLayout.tsx` | Two-panel layout: left = scrollable entity list (`w-60`), right = `<Outlet>` detail/form; reads `entityType` from URL to select config |
+| `Sidebar` | `src/components/layout/Sidebar.tsx` | Left nav rail (`w-48`), app name, auto-generated `NavLink` per registered entity type from `getAllEntityConfigs()` |
 | `Header` | `src/components/layout/Header.tsx` | Top bar: sync state dot indicator, current `userId`, Logout button |
-
-`ContactsLayout` also renders an "Export JSON" button at the bottom of the left panel that calls `exportContactsJson` from `src/lib/export.ts`. The button is disabled when there are no contacts.
 
 ---
 
@@ -52,11 +52,13 @@ The spinner on `"idle"` and `"loading"` prevents a flash-to-login on page reload
 
 | Context | Pattern | Component / File |
 |---|---|---|
-| Session restore on reload | `loginState === "idle"` or `"loading"` → spinner div | `src/components/layout/AppLayout.tsx:16` |
-| Form submission (create / edit contact) | `isSubmitting` from `useForm` → button disabled + "Saving..." label | `src/components/contacts/ContactForm.tsx:279` |
-| Avatar image upload | `uploadState === "uploading"` → spinning SVG icon next to the "Replace" button | `src/components/contacts/ContactForm.tsx:165` |
-| File upload (FileDropZone) | `uploading: string[]` — per-filename spinning SVG | `src/components/contacts/FileDropZone.tsx:114` |
-| Share action | `sharing` boolean → button disabled + "Sharing..." label | `src/components/contacts/ShareDialog.tsx:79` |
+| Session restore on reload | `loginState === "idle"` or `"loading"` → spinner div | `src/components/layout/AppLayout.tsx` |
+| Entity list syncing | `isReady === false` → "Syncing..." paragraph | `src/components/entity/EntityList.tsx` |
+| Entity data still syncing | `entity === undefined` after hydration → "data is still syncing..." message | `src/pages/EntityDetailPage.tsx` |
+| Form submission (create / edit) | `isSubmitting` from `useForm` → button disabled + "Saving..." label | `src/components/entity/EntityForm.tsx` |
+| Avatar image upload | `uploadState === "uploading"` → spinning SVG icon | `src/components/entity/EntityFormField.tsx` |
+| File upload (FileDropZone) | `uploading: string[]` — per-filename spinning SVG | `src/components/contacts/FileDropZone.tsx` |
+| Share action | `sharing` boolean → button disabled + "Sharing..." label | `src/components/contacts/ShareDialog.tsx` |
 
 There is no global loading indicator. Sync state (SYNCING, RECONNECTING, etc.) is reflected only by the colored dot in `Header`.
 
@@ -64,30 +66,55 @@ There is no global loading indicator. Sync state (SYNCING, RECONNECTING, etc.) i
 
 ## Form Patterns
 
-All forms use **React Hook Form** with a **Zod resolver**.
+All forms use **React Hook Form** with a **Zod resolver**. Entity forms are fully auto-generated from `EntityConfig.fields`.
 
-**Setup pattern (from `ContactForm`):**
+**Setup pattern (from `EntityForm`):**
 
 ```typescript
-const { register, handleSubmit, formState: { errors, isSubmitting } } =
-  useForm<ContactFormData>({
-    resolver: zodResolver(ContactFormSchema),
+const { register, handleSubmit, control, formState: { errors, isSubmitting } } =
+  useForm({
+    resolver: zodResolver(config.formSchema as any),
     defaultValues,
   });
 ```
 
+The `as any` cast is required because `ZodTypeAny` does not satisfy `@hookform/resolvers` v5's generic constraints with Zod v4.
+
+**Field rendering** is delegated to `EntityFormField` (`src/components/entity/EntityFormField.tsx`) which switches on `field.type`:
+
+| Field type | Rendered as |
+|---|---|
+| `text` / `email` / `date` | `<input type={...} {...register(field.name)} />` |
+| `color` | `<input type="color" />` |
+| `select` | `<select>` with `field.options` |
+| `avatar` | Avatar upload input via `useController` |
+| `relation` | `<RelationField>` component |
+
 **Error display strategy:** Field-level errors only. Each field renders the error message immediately below its input:
 
 ```tsx
-{errors.fullname && (
-  <p className="text-red-500 text-xs mt-1">{errors.fullname.message}</p>
+{errors[field.name] && (
+  <p className="text-red-500 text-xs mt-1">{errors[field.name]?.message}</p>
 )}
 ```
 
-There are no form-level error summaries. Submission errors (network failures) are surfaced by the calling page (e.g. `NewContactPage`, `ContactDetailPage`) as component state outside the form.
+There are no form-level error summaries. Submission errors (network failures) are surfaced by the calling page as component state outside the form.
 
-**Zod schemas used by forms:**
-- `ContactFormSchema` (`src/schemas/contact.schema.ts:29`) — omits `id`, `createdAt`, `createdBy`, `updatedAt`, `dataRoomId`, `commentsRoomId` from the full `ContactSchema`.
+---
+
+## Relation Field
+
+**File:** `src/components/entity/RelationField.tsx`
+
+The relation field renders a searchable picker for fields of type `relation`. It reads the target entity type from the entity store and renders:
+
+1. **Selected badges** — one badge per selected entity, with a clickable `<Link>` to the related entity's detail page (`/<urlSegment>/<id>`) and a `×` remove button.
+2. **Search input** — filters the target entity list by `displayNameFn` output.
+3. **Dropdown list** — shown only when the search input is non-empty; clicking an item toggles selection.
+
+The value is `string[]` (entity IDs). For `multiple: false` fields, selecting an already-selected item deselects it (toggle behavior).
+
+**Important:** The `useEntityStore` hook must be called before the `if (!field.relation) return null` guard — it is called unconditionally at the top of the component to comply with React's Rules of Hooks.
 
 ---
 
@@ -95,7 +122,7 @@ There are no form-level error summaries. Submission errors (network failures) ar
 
 **File:** `src/components/contacts/FileDropZone.tsx`
 
-The component accepts a `contactId` and `dataRoomId` prop. It renders:
+The component accepts `entityId`, `entityType`, and `dataRoomId` props. It renders:
 
 1. **Drop target div** — responds to `onDrop`, `onDragOver`, `onDragLeave`. Clicking it triggers `inputRef.current?.click()` to open the system file picker.
 2. **Hidden `<input type="file" multiple>`** — actual file input, visually hidden.
@@ -108,9 +135,9 @@ The component accepts a `contactId` and `dataRoomId` prop. It renders:
 ```
 user drops / selects files
   → uploadFile(file) called per file
-  → sendContactFile(client, dataRoomId, contactId, file)   src/matrix/events.ts:85
+  → sendEntityFile(client, config, dataRoomId, entityId, file)   src/matrix/entity-events.ts:94
       → client.uploadContent(file)        ← raw bytes to media server (unencrypted)
-      → client.sendEvent(EVENT_TYPE_CONTACT_FILE, { filename, mxc_uri, ... })
+      → (client as any).sendEvent(dataRoomId, fileEventType, { entity_id, filename, mxc_uri, ... })
   → onDecrypted or onTimeline triggers refreshFiles()
   → store updates → component re-renders with new file in list
 ```
@@ -126,6 +153,8 @@ Uses the authenticated media endpoint (`/_matrix/client/v1/media/download/...`) 
 **File:** `src/components/contacts/ShareDialog.tsx`
 
 Uses the native `<dialog>` element (`dialogRef.current?.showModal()` / `.close()`). No custom backdrop implementation — relies on the browser's native `::backdrop` pseudo-element styled with `backdrop:bg-black/40`.
+
+Props: `entityId`, `dataRoomId?`, `commentsRoomId?`.
 
 **Flow:**
 
@@ -165,12 +194,12 @@ Known gaps. None have been addressed in the current codebase.
 
 | Issue | Component / File | Suggested fix |
 |---|---|---|
-| Drop zone has no `role`, no `aria-label`, no keyboard navigation | `src/components/contacts/FileDropZone.tsx:89` | Add `role="button"`, `aria-label="Upload files"`, `tabIndex={0}`, and `onKeyDown` handler (Enter/Space to open picker) |
-| Sync state indicator is color-only (green/yellow/red dot) | `src/components/layout/Header.tsx:11` | The dot has a `title` attribute with the sync state string; also add a visually-hidden `<span>` for screen readers |
-| No `aria-live` region for dynamic contact list updates | `src/components/contacts/ContactsList.tsx` | Wrap the list in a `<div aria-live="polite">` or announce updates via a visually-hidden live region |
-| No focus trap on the share `<dialog>` | `src/components/contacts/ShareDialog.tsx:41` | The native `<dialog>` element provides a focus trap natively in modern browsers; verify this works across target browsers |
-| `VerificationBanner` has no `role="alert"` and no `aria-live` | `src/components/verification/VerificationBanner.tsx:12` | Add `role="alertdialog"` and `aria-label` to the banner div so screen readers announce incoming verification requests |
-| Form errors not associated with their inputs via `aria-describedby` | `src/components/contacts/ContactForm.tsx` | Pass an `id` to each error `<p>` and add `aria-describedby` to the corresponding `<input>` |
+| Drop zone has no `role`, no `aria-label`, no keyboard navigation | `src/components/contacts/FileDropZone.tsx` | Add `role="button"`, `aria-label="Upload files"`, `tabIndex={0}`, and `onKeyDown` handler (Enter/Space to open picker) |
+| Sync state indicator is color-only (green/yellow/red dot) | `src/components/layout/Header.tsx` | The dot has a `title` attribute with the sync state string; also add a visually-hidden `<span>` for screen readers |
+| No `aria-live` region for dynamic entity list updates | `src/components/entity/EntityList.tsx` | Wrap the list in a `<div aria-live="polite">` or announce updates via a visually-hidden live region |
+| No focus trap on the share `<dialog>` | `src/components/contacts/ShareDialog.tsx` | The native `<dialog>` element provides a focus trap natively in modern browsers; verify this works across target browsers |
+| `VerificationBanner` has no `role="alert"` and no `aria-live` | `src/components/verification/VerificationBanner.tsx` | Add `role="alertdialog"` and `aria-label` to the banner div so screen readers announce incoming verification requests |
+| Form errors not associated with their inputs via `aria-describedby` | `src/components/entity/EntityForm.tsx` | Pass an `id` to each error `<p>` and add `aria-describedby` to the corresponding `<input>` |
 
 ---
 

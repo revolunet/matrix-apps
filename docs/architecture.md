@@ -13,7 +13,7 @@ proto-cms-matrix is a serverless SPA. There is no application server, no REST AP
 │                                                         │
 │  React SPA                                              │
 │  ┌──────────────┐   Zustand stores                      │
-│  │  Components  │ ◄──────────────── contacts.store.ts   │
+│  │  Components  │ ◄──────────────── entity.store.ts     │
 │  │  (pages,     │                   auth.store.ts        │
 │  │   layout,    │                   sync.store.ts        │
 │  │   forms)     │                                        │
@@ -40,6 +40,38 @@ proto-cms-matrix is a serverless SPA. There is no application server, no REST AP
 │  • Media repository      │
 │    (unencrypted bytes)   │
 └──────────────────────────┘
+```
+
+---
+
+## Entity Registry
+
+The app uses an **entity registry pattern** (`src/entities/registry.ts`). Each entity type registers a self-contained `EntityConfig` at startup:
+
+```typescript
+registerEntity({
+  type: 'contact',
+  label: 'Contact',
+  pluralLabel: 'Contacts',
+  urlSegment: 'contacts',
+  schema: ContactSchema,
+  formSchema: ContactFormSchema,
+  fields: [...],
+  eventTypePrefix: 'org.demo-e2e-app.contact',
+  roomNameFn: (id, suffix) => `demo-e2e-app/channels/${id}${suffix ? `-${suffix}` : ''}`,
+  displayNameFn: (data) => data.fullname ?? data.id,
+  matchRoomName: (name) => { /* reverse-parse name → { entityId, isComments } */ },
+})
+```
+
+All UI (routing, sidebar, forms, list views, detail pages), Matrix helpers (room creation, event types, index keys), and store operations are driven generically from these configs. Adding a new entity type requires only a schema file, a config file, and one import in `src/App.tsx`.
+
+Entity configs are registered by importing the config module at the top of `src/App.tsx`:
+
+```typescript
+import "@/entities/contact/config";
+import "@/entities/company/config";
+import "@/entities/training/config";
 ```
 
 ---
@@ -82,15 +114,17 @@ bootstrapCrypto()   [background]     src/matrix/client.ts:85
   errors suppressed as console.warn (non-fatal prototype choice)
         │
         ▼
-attachSyncListeners()                src/matrix/sync.ts:35
+attachSyncListeners()                src/matrix/sync.ts:28
   Registers 5 Matrix SDK event listeners.
   If PREPARED/SYNCING already reached: calls markReady() immediately.
         │
         ▼
-hydrateFromMatrix()   [debounced]    src/stores/contacts.store.ts:40
-  Reads account_data index → filters stale rooms → rebuilds roomToContact map
-  Auto-joins pending invites → pairs data+comments rooms for shared contacts
-  Calls refreshContact / refreshComments / refreshFiles for each entry
+hydrateFromMatrix()   [debounced]    src/stores/entity.store.ts
+  Reads all registered entity types via getAllEntityConfigs()
+  For each type: reads account_data index → auto-joins pending invites
+  Pairs data+comments rooms using config.matchRoomName()
+  Calls refreshEntity / refreshComments / refreshFiles for each entry
+  Builds roomToEntity: Record<roomId, { type, id }> for O(1) dispatch
 ```
 
 On page reload, `initializeSession()` (`src/matrix/auth.ts:110`) reads the stored session from `sessionStorage` and runs the same chain from `createMatrixClient` onward, bypassing the login form.
@@ -101,60 +135,70 @@ On page reload, `initializeSession()` (`src/matrix/auth.ts:110`) reads the store
 
 ### ADR-1: Full-snapshot events instead of state events
 
-**Decision:** Contact data is stored as regular Megolm-encrypted timeline events of type `org.demo-e2e-app.contact.update`. Every edit appends a new full snapshot. The reader (`extractLatestContact`) scans from the newest event backward and returns the first successfully decrypted snapshot.
+**Decision:** Entity data is stored as regular Megolm-encrypted timeline events of type `<eventTypePrefix>.update`. Every edit appends a new full snapshot. The reader (`extractLatestEntity`) scans from the newest event backward and returns the first successfully decrypted snapshot.
 
-**Why not Matrix state events?** Matrix state events (`m.room.member`, `m.room.name`, etc.) cannot be E2E encrypted. A state event's `content` is transmitted in plaintext between homeserver and clients. Using state events for contact data would expose all fields to the homeserver operator.
+**Why not Matrix state events?** Matrix state events (`m.room.member`, `m.room.name`, etc.) cannot be E2E encrypted. A state event's `content` is transmitted in plaintext between homeserver and clients. Using state events for entity data would expose all fields to the homeserver operator.
 
 **Trade-off:** The room timeline grows linearly with edits. There is no compaction. See LIMIT-11 in [limitations.md](limitations.md).
 
-**Code reference:** `src/matrix/events.ts:35` — `extractLatestContact()` iterates `room.getLiveTimeline().getEvents()` in reverse, skipping events that are still being decrypted or have failed decryption.
+**Code reference:** `src/matrix/entity-events.ts:25` — `extractLatestEntity()` iterates `room.getLiveTimeline().getEvents()` in reverse, skipping events that are still being decrypted or have failed decryption. Supports both new `content.entity` format and legacy `content.contact` format for backward compatibility.
 
 ---
 
-### ADR-2: Two rooms per contact (data room + comments room)
+### ADR-2: Two rooms per entity (data room + comments room)
 
-**Decision:** Each contact gets two separate Matrix rooms created in `src/matrix/rooms.ts:27` (`createContactRooms`):
+**Decision:** Each entity gets two separate Matrix rooms created in `src/matrix/entity-rooms.ts` (`createEntityRooms`):
 
-- **Data room** — stores `contact.update` events and `contact.file` events.
+- **Data room** — stores `<prefix>.update` events and `<prefix>.file` events.
 - **Comments room** — stores `m.room.message` events (plain text comments).
 
-**Why two rooms?** Room membership is per-room. Using two rooms allows fine-grained sharing: the contact owner can later grant read-only access to the data room while keeping comments private (or vice versa). With a single room, every invitee would see everything.
+**Why two rooms?** Room membership is per-room. Using two rooms allows fine-grained sharing: the entity owner can later grant read-only access to the data room while keeping comments private (or vice versa). With a single room, every invitee would see everything.
 
-**Naming convention:** Room names follow the pattern defined in `src/lib/constants.ts:22`:
-- Data room: `demo-e2e-app/channels/<contactId>`
-- Comments room: `demo-e2e-app/channels/<contactId>-comments`
+**Naming convention:** Room names are derived by each entity config's `roomNameFn`. The `-comments` suffix is the pairing signal used by `matchRoomName` to distinguish the two rooms. Example for Contact:
+- Data room: `demo-e2e-app/channels/<id>`
+- Comments room: `demo-e2e-app/channels/<id>-comments`
 
-The `-comments` suffix is the pairing signal used by `hydrateFromMatrix` to match shared rooms into a single `IndexEntry`.
-
-Both rooms use `m.megolm.v1.aes-sha2` encryption (`src/matrix/rooms.ts:17`).
+Both rooms use `m.megolm.v1.aes-sha2` encryption (`src/matrix/entity-rooms.ts`).
 
 ---
 
-### ADR-3: Contact index in `account_data`
+### ADR-3: Per-entity-type index in `account_data`
 
-**Decision:** A contact index (`org.demo-e2e-app.contact_index`) is stored in Matrix `account_data` via `client.setAccountData()` (`src/matrix/index-room.ts:24`). The index maps `contactId → { dataRoomId, commentsRoomId, displayName }`.
+**Decision:** Each entity type stores its own index in Matrix `account_data` under the key `<eventTypePrefix>_index` (e.g. `org.demo-e2e-app.contact_index`). The index maps `entityId → { dataRoomId, commentsRoomId, displayName, addedAt }`. Managed by `src/matrix/entity-index.ts`.
 
 **Why `account_data`?**
 - Syncs automatically across all of the user's devices without any extra infrastructure.
 - Survives browser storage clears (unlike IndexedDB or localStorage).
 - No extra Matrix room is needed.
 
-**Trade-off:** `account_data` events are not E2E encrypted. They are visible to the homeserver operator. The index stores only room IDs and a display name — not sensitive contact fields. The actual contact data lives in encrypted room events. See the security table in [security.md](security.md).
+**Trade-off:** `account_data` events are not E2E encrypted. They are visible to the homeserver operator. The index stores only room IDs and a display name — not sensitive entity fields. The actual entity data lives in encrypted room events. See the security table in [security.md](security.md).
 
-**Schema:** `src/schemas/index.schema.ts` — `IndexEntrySchema` (contactId, dataRoomId, commentsRoomId, displayName, addedAt).
+**Backward compatibility:** The contact index key `org.demo-e2e-app.contact_index` is identical to the legacy `INDEX_EVENT_TYPE` value, so pre-existing contacts remain discoverable after the migration.
+
+---
+
+### ADR-4: Entity Registry Pattern
+
+**Decision:** All entity type definitions (schema, fields, event type prefix, room naming, display name) are encapsulated in self-contained `EntityConfig` objects registered at startup via `registerEntity()`. All UI, routing, Matrix helpers, and store operations are driven generically from the registry — there are no entity-specific pages, store methods, or matrix helpers.
+
+**Why not per-entity pages/stores?** The prototype needed to support multiple entity types (Contact, Company, Training) without duplicating pages, stores, and Matrix helpers for each. A registry pattern allows O(1) addition of new entity types.
+
+**Trade-off:** The generic layer adds indirection. TypeScript types use `unknown` for entity data payloads, which requires explicit casts at access points. Per-entity customization (e.g., a special list view for one entity type) cannot be expressed through the generic `EntityConfig` interface without extending it.
 
 ---
 
 ## Event Type Registry
 
-| Event type constant | SDK event type string | Room | Content schema | Encrypted |
-|---|---|---|---|---|
-| `EVENT_TYPE_CONTACT_UPDATE` | `org.demo-e2e-app.contact.update` | Data room | `ContactSchema` (`src/schemas/contact.schema.ts`) | Yes (Megolm) |
-| `EVENT_TYPE_CONTACT_FILE` | `org.demo-e2e-app.contact.file` | Data room | `ContactFileSchema` (`src/schemas/file.schema.ts`) | Yes (Megolm) — metadata only; file bytes are unencrypted |
-| *(no constant)* | `m.room.message` (msgtype `m.text`) | Comments room | `CommentSchema` (`src/schemas/comment.schema.ts`) | Yes (Megolm) |
-| `INDEX_EVENT_TYPE` | `org.demo-e2e-app.contact_index` | `account_data` | `ContactIndexSchema` (`src/schemas/index.schema.ts`) | No |
+Event types are derived at runtime from each entity config's `eventTypePrefix`. There are no static constant definitions for custom event types.
 
-Constants are defined in `src/lib/constants.ts:19`. Note that `EVENT_TYPE_COMMENT` is **absent** from constants — see BUG-01 in [limitations.md](limitations.md).
+| Pattern | Example | Room | Purpose | Encrypted |
+|---|---|---|---|---|
+| `<prefix>.update` | `org.demo-e2e-app.contact.update` | Data room | Full entity snapshot (latest wins) | Yes (Megolm) |
+| `<prefix>.file` | `org.demo-e2e-app.contact.file` | Data room | File attachment metadata | Yes (Megolm) — metadata only; file bytes are unencrypted |
+| `m.room.message` | `m.room.message` | Comments room | Comment text | Yes (Megolm) |
+| `<prefix>_index` | `org.demo-e2e-app.contact_index` | `account_data` | Entity index (room IDs, display names) | No |
+
+All custom event types are sent using `(client as any).sendEvent(...)` to bypass Matrix SDK v41's strict `TimelineEvents` union type constraint. See `src/matrix/entity-events.ts`.
 
 ---
 
@@ -165,46 +209,63 @@ Three Zustand stores manage all runtime state:
 | Store file | State held | Key actions |
 |---|---|---|
 | `src/stores/auth.store.ts` | `client`, `userId`, `deviceId`, `loginState` | `setClient`, `setLoginState`, `clearAuth` |
-| `src/stores/contacts.store.ts` | `contacts`, `comments`, `files`, `indexEntries`, `roomToContact` | `hydrateFromMatrix`, `refreshContact`, `refreshComments`, `refreshFiles`, `upsertContact`, `removeContact` |
+| `src/stores/entity.store.ts` | `entities`, `comments`, `files`, `indices`, `roomToEntity` | `hydrateFromMatrix`, `refreshEntity`, `refreshComments`, `refreshFiles`, `upsertEntity`, `removeEntity` |
 | `src/stores/sync.store.ts` | `syncState`, `isReady` | `setSyncState`, `setReady`, `reset` |
 
-### `roomToContact` lookup map
+### `entity.store.ts` shape
 
-`src/stores/contacts.store.ts:22` declares `roomToContact: Record<string, string>` — a flat map from any room ID (data or comments) to its `contactId`. This enables O(1) dispatch inside the sync listeners: when a timeline event arrives in a room, the listener does a single map lookup to find which contact to refresh.
+```typescript
+{
+  entities:    Record<type, Record<id, unknown>>   // all entity data
+  comments:    Record<type, Record<id, Comment[]>>
+  files:       Record<type, Record<id, EntityFile[]>>
+  indices:     Record<type, IndexEntry[]>          // account_data index entries
+  roomToEntity: Record<roomId, { type: string; id: string }>  // O(1) dispatch map
+}
+```
 
-The map is rebuilt from scratch on every call to `hydrateFromMatrix` (`src/stores/contacts.store.ts:59`).
+### `roomToEntity` lookup map
+
+`roomToEntity: Record<string, { type: string; id: string }>` is a flat map from any room ID (data or comments) to its entity type key and entity ID. This enables O(1) dispatch inside the sync listeners: when a timeline event arrives in a room, the listener does a single map lookup to find which entity to refresh.
+
+The map is rebuilt from scratch on every call to `hydrateFromMatrix`.
+
+### Zustand selector stability
+
+Selectors must return stable references to avoid Zustand's snapshot comparison triggering infinite re-render loops. Immer-managed nested objects return the same reference when unchanged, so selectors should return raw Immer refs without `?? {}` / `?? []` fallbacks inside the selector. Fallbacks belong in the component body after the hook call.
 
 ### `hydrateFromMatrix` lifecycle
 
 `hydrateFromMatrix` is called:
-1. When the sync reaches `PREPARED` or `SYNCING` (via `markReady` → `scheduleHydrate` in `src/matrix/sync.ts:33`).
+1. When the sync reaches `PREPARED` or `SYNCING` (via `markReady` → `scheduleHydrate` in `src/matrix/sync.ts:20`).
 2. On every subsequent `SYNCING` event (ensuring recovery after decryption delays).
-3. When a new `account_data` event of type `INDEX_EVENT_TYPE` arrives.
+3. When a new `account_data` event matching any entity type's index key arrives.
 4. When the current user receives a room invite.
+5. When an `onDecrypted` event fires before `roomToEntity` is populated (race condition guard).
 
-All calls are debounced with a 400 ms timer (`src/matrix/sync.ts:15`).
+All calls are debounced with a 400 ms timer (`src/matrix/sync.ts:12`).
 
 ---
 
 ## Sync Architecture
 
-`attachSyncListeners` (`src/matrix/sync.ts:35`) registers five listeners on the Matrix client and returns a cleanup function:
+`attachSyncListeners` (`src/matrix/sync.ts:28`) registers five listeners on the Matrix client and returns a cleanup function:
 
 | Listener | SDK event | What it does |
 |---|---|---|
 | `onSync` | `ClientEvent.Sync` | Updates `syncState`; calls `markReady` (→ `scheduleHydrate`) on `PREPARED`/`SYNCING` |
-| `onTimeline` | `RoomEvent.Timeline` | Dispatches `refreshContact`, `refreshComments`, or `refreshFiles` based on event type and `roomToContact` lookup |
-| `onDecrypted` | `MatrixEventEvent.Decrypted` | Same as `onTimeline` but fires after async decryption completes — handles events that arrive encrypted and decrypt later |
-| `onAccountData` | `ClientEvent.AccountData` | Schedules `hydrateFromMatrix` when the index `account_data` event changes |
-| `onMembership` | `RoomMemberEvent.Membership` | Handles kick/ban (remove from store), self-invite (schedule hydrate), and other-user join (re-send contact snapshot) |
+| `onTimeline` | `RoomEvent.Timeline` | Looks up `roomToEntity[roomId]` → dispatches `refreshEntity`, `refreshComments`, or `refreshFiles` based on event type; event type strings built from `config.eventTypePrefix` |
+| `onDecrypted` | `MatrixEventEvent.Decrypted` | Same as `onTimeline` but fires after async decryption completes; schedules hydrate if room not yet in `roomToEntity` |
+| `onAccountData` | `ClientEvent.AccountData` | Schedules `hydrateFromMatrix` when any entity index `account_data` event changes |
+| `onMembership` | `RoomMemberEvent.Membership` | Handles kick/ban (remove from store + index for all entity types), self-invite (schedule hydrate), other-user join (re-send entity snapshot) |
 
 ### Debounce strategy
 
-`scheduleHydrate` uses a single shared 400 ms `setTimeout`. Every call resets the timer, so bursts of sync events (e.g. initial sync with 10 rooms) result in a single hydration pass.
+`scheduleHydrate` uses a single shared 400 ms `setTimeout`. Every call resets the timer, so bursts of sync events (e.g. initial sync with many rooms) result in a single hydration pass.
 
 ### Re-send on member join
 
-When a new member joins the data room, the sender's `onMembership` handler waits 2 seconds then calls `sendContactUpdate` with the current contact snapshot (`src/matrix/sync.ts:169`). This is necessary because the new member cannot decrypt historical Megolm ciphertexts — they were encrypted before the new member's device was added to the session. The fresh event is encrypted with a new Megolm session that includes the new device.
+When a new member joins a data room, the `onMembership` handler iterates all entity indices to find which entity owns that room. It then waits 2 seconds and calls `sendEntityUpdate` with the current entity snapshot (`src/matrix/sync.ts:166`). This is necessary because the new member cannot decrypt historical Megolm ciphertexts — they were encrypted before the new member's device was added to the session. The fresh event is encrypted with a new Megolm session that includes the new device.
 
 Debounced per `roomId:userId` pair to avoid bursts.
 
@@ -245,7 +306,7 @@ Runs fire-and-forget after `startMatrixClient` resolves. Errors are `console.war
 
 1. `crypto.isSecretStorageReady()` — if already set up (e.g., existing account with Element), skip creation.
 2. `crypto.bootstrapSecretStorage({ createSecretStorageKey })` — creates a new recovery key, encodes it as base64, stores in `sessionStorage`.
-3. `crypto.bootstrapCrossSigning({ authUploadDeviceSigningKeys })` — reads the login password from `sessionStorage["matrix_login_password"]` for UIA. Errors suppressed. See BUG-03 and LIMIT-02 in [limitations.md](limitations.md).
+3. `crypto.bootstrapCrossSigning({ authUploadDeviceSigningKeys })` — reads the login password from `sessionStorage["matrix_login_password"]` for UIA. Errors suppressed. See BUG-03 in [limitations.md](limitations.md).
 
 A per-session guard key (`matrix_crypto_bootstrapped:${userId}:${deviceId}`) in `sessionStorage` prevents re-running bootstrap within the same tab session.
 
@@ -254,11 +315,11 @@ A per-session guard key (`matrix_crypto_bootstrapped:${userId}:${deviceId}`) in 
 ## Sharing Flow
 
 1. User opens the Share modal and enters a Matrix user ID (`@alice:matrix.org`).
-2. `useShareContact.shareWith()` (`src/hooks/useShareContact.ts:11`) calls `client.invite()` on both the data room and comments room in parallel.
+2. `useShareContact.shareWith()` (`src/hooks/useShareContact.ts`) calls `client.invite()` on both the data room and comments room in parallel.
 3. On the invitee's side, the next `SYNCING` event triggers `hydrateFromMatrix`.
-4. `hydrateFromMatrix` (`src/stores/contacts.store.ts:68`) finds rooms with `invite` membership and an `APP_PREFIX` name, auto-joins them.
-5. It then scans all joined rooms for the `demo-e2e-app/channels/` prefix and pairs data + comments rooms by the `-comments` suffix (`src/stores/contacts.store.ts:100`).
-6. Newly discovered `IndexEntry` objects are written into both the in-memory store and `account_data` index.
-7. On the owner's side, `onMembership` detects the new join and fires the re-send logic (see Sync Architecture above) so the invitee can decrypt the contact immediately.
+4. `hydrateFromMatrix` (`src/stores/entity.store.ts`) finds rooms with `invite` membership and an `APP_PREFIX` name, auto-joins them.
+5. It then calls each entity config's `matchRoomName()` to identify entity type and whether the room is a data or comments room.
+6. Data + comments rooms are paired into `IndexEntry` objects written into both the in-memory store and `account_data` index.
+7. On the owner's side, `onMembership` detects the new join and fires the re-send logic so the invitee can decrypt the entity immediately.
 
 **Known fragility:** There is no real-time listener for incoming invites during an active session. Sharing is only detected on the next `SYNCING` poll (~30 s) or on a tab reload. See LIMIT-07 in [limitations.md](limitations.md).
