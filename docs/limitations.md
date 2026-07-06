@@ -161,3 +161,49 @@ There are no unit tests, integration tests, or end-to-end tests in the repositor
 No React `<ErrorBoundary>` components exist anywhere in the tree. See [security.md](security.md) — Silent Failures for detail.
 
 ---
+
+### LIMIT-14 — Session restore has no timeout or escape hatch
+
+**File:** `src/matrix/client.ts:301` — `startMatrixClient`
+
+On page reload, `initializeSession()` awaits a Promise that only resolves once the Matrix client emits `PREPARED` or `SYNCING`. There is no timeout and no way to cancel: `AppLayout` (`src/components/layout/AppLayout.tsx`) shows a bare spinner for `loginState === "idle" | "loading"` with no logout button, so a stuck sync (bad network, homeserver down, corrupted crypto store) leaves the user on an unrecoverable blank spinner — the only way out is manually clearing `sessionStorage`.
+
+**Fix:** Add a timeout that falls back to `"unauthenticated"` (or a retry prompt) if sync hasn't reached `PREPARED`/`SYNCING` within, say, 30 seconds, and surface a "Log out" action from the spinner screen itself.
+
+---
+
+## Missing — Docs
+
+### LIMIT-15 — Drag-and-drop reorder is root-level only
+
+**File:** `src/features/docs/DocTree.tsx:128` — `handleDragEnd`
+
+```typescript
+// Only handle root-level reordering for now
+const rootDocs = docs.filter((d) => !d.parentDocId).sort(...)
+```
+
+Dragging a document within the root list reorders it; dragging a nested sub-page (or dragging a document into/out of a parent) does nothing — `DocTreeItem` renders drag handles at every depth, but `handleDragEnd` only recomputes order for root-level siblings, so mid-tree drags are silently ignored.
+
+**Fix:** Track the dragged item's depth/parent and recompute sibling order within whichever parent it was dropped under; use `moveDoc` for cross-parent drops.
+
+---
+
+### LIMIT-16 — Document hierarchy has two sources of truth
+
+See "Hierarchy: private index + mirrored room state" in [architecture.md](architecture.md#docs-architecture). The owner's private `account_data` index (`docs_index`) and each room's `DOC_META_STATE_TYPE` state event are two independent copies of the same title/parent data, kept in sync only because `renameDoc` and `moveDoc` happen to write both. A code path that updates one and not the other (or a write that fails partway through) leaves the owner's tree and a collaborator's "Shared with me" tree permanently disagreeing about a document's title or position, with no reconciliation.
+
+**Fix:** Derive one view from the other at read time (e.g. always resolve hierarchy from room state, never from private account_data), or add a reconciliation pass that compares the two and repairs drift.
+
+---
+
+### LIMIT-17 — Sub-document sharing fan-out isn't self-healing
+
+See "Sharing and sub-document fan-out" in [architecture.md](architecture.md#docs-architecture). Access to a document tree is the union of whatever invite/kick fan-outs have run correctly since it was created (`DocShareDialog`'s share/remove handlers, `createDoc`'s parent-membership inheritance). There is no single membership list this is checked against:
+
+- If any individual fan-out `invite()`/`kick()` call fails, the user only sees a generic count in a warning message (`shareWarning`/`removeError`) — there's no retry, and the specific failed sub-doc isn't identified.
+- Moving a sub-document to a different parent (`moveDoc`) does not re-run the fan-out, so its membership stays whatever it was under the old parent, potentially leaving people who could see the old parent still able to see the moved doc, or new parent-collaborators unable to.
+
+**Fix:** Recompute and reconcile a sub-tree's membership against its current parent's membership whenever the tree is moved, and surface exactly which sub-documents a partial fan-out failure affected so the user can retry them individually.
+
+---

@@ -25,8 +25,13 @@
 | Entity fields (contact, company, training data) | Yes | Megolm (E2E) | No — ciphertext only |
 | Comments (message body) | Yes | Megolm (E2E) | No — ciphertext only |
 | File metadata (filename, size, mimetype, mxc URI) | Yes | Megolm (E2E) in `<prefix>.file` event | No — ciphertext only |
-| **File bytes** | **No** | `client.uploadContent()` sends raw bytes | **Yes — plaintext on media server** |
+| File bytes | Yes | Client-side AES-256-CTR (`attachment-crypto.ts`) before upload; key/IV in the Megolm-encrypted `<prefix>.file` event | No — ciphertext only (filename also omitted from the upload) |
 | Entity indices (room IDs, display names) | No | `account_data` — Matrix spec does not encrypt this | **Yes — plaintext** |
+| Doc content (Yjs updates/snapshots) | Yes | Megolm (E2E), chunked at 24 KB to stay under Matrix's 65 KB event-size limit | No — ciphertext only |
+| Doc comments (message body) | Yes | Megolm (E2E) — same room as content, tagged `doc_comment: true` | No — ciphertext only |
+| Doc file attachments (BlockNote uploads) | Yes | Client-side AES-256-CTR (`attachment-crypto.ts`), same scheme as CRM files | No — ciphertext only |
+| Doc title/hierarchy (`DOC_META_STATE_TYPE` room state) | No | Matrix state events cannot be E2E encrypted (same constraint as ADR-1) | **Yes — plaintext**, to every room member and the homeserver operator |
+| Doc hierarchy index (owner's private tree) | No | `account_data` (`docs_index`) | **Yes — plaintext** |
 | Access token | No | Stored in `sessionStorage` under `matrix_session` key | Exposed to any JS on origin (XSS risk) |
 | Recovery key | No | Stored in `sessionStorage["matrix_recovery_key"]` as base64 | Exposed to any JS on origin; lost on tab close |
 | Login password | No | Stored in `sessionStorage["matrix_login_password"]` for UIA | Exposed to any JS on origin; lingers after bootstrap |
@@ -112,21 +117,35 @@ See BUG-03 in [limitations.md](limitations.md) for the silent failure on matrix.
 **File:** `src/matrix/entity-events.ts:94` — `sendEntityFile()`
 
 ```typescript
-const { content_uri: mxcUri } = await client.uploadContent(file);
+const data = await file.arrayBuffer();
+const { ciphertext, info } = await encryptAttachment(data);
+const { content_uri: mxcUri } = await client.uploadContent(ciphertext, {
+  type: "application/octet-stream",
+  includeFilename: false,
+});
 await (client as any).sendEvent(dataRoomId, fileEventType, {
   entity_id: entityId,
   filename: file.name,
   mxc_uri: mxcUri,
   mimetype: file.type || "application/octet-stream",
   size: file.size,
+  enc_info: info,
 });
 ```
 
-`client.uploadContent()` sends the raw file bytes to the homeserver media repository (`/_matrix/media/v3/upload`) without client-side encryption. The homeserver stores the file in plaintext and serves it via the media API to any client that knows the `mxc://` URI.
+CRM file attachments are now encrypted client-side with AES-256-CTR (`src/matrix/attachment-crypto.ts`) before upload, using the same scheme Docs attachments already used — the homeserver media repository only ever stores ciphertext. The decryption key/IV and a SHA-256 integrity hash travel inside the Megolm-encrypted `<prefix>.file` event content (`enc_info`), never touching the media repo. The upload also omits the filename from the multipart request (`includeFilename: false`) so it isn't visible to the server outside the encrypted event.
 
-The `<prefix>.file` event that records the URI is Megolm-encrypted (only room members can read the URI), but once the URI is known, the file bytes are accessible to the homeserver operator and to any Matrix client that has the URI.
+Files uploaded before this change remain plaintext at their existing `mxc://` URI — `EntityFile.encInfo` is absent on those records, and the download path (`FileDropZone.handleDownload`) falls back to fetching them as-is instead of attempting decryption.
 
-**Fix:** Use the Matrix encrypted attachment spec: encrypt the file bytes client-side with AES-CTR, upload the ciphertext, and store the decryption key inside the encrypted event content as an `EncryptedFile` object. This is what Element and other production Matrix clients do.
+---
+
+## Docs-Specific Considerations
+
+**Titles and hierarchy are plaintext to the homeserver, unlike CRM display names.** The CRM's entity index (also unencrypted `account_data`) is only visible to the account owner and the homeserver operator. Docs' `DOC_META_STATE_TYPE` room state event (`{ title, parentDocId, docId }`) is a Matrix **state event**, which cannot be E2E encrypted at all (same spec limitation as ADR-1 in [architecture.md](architecture.md)) — so a document's title is plaintext not just to the homeserver operator but to every current and former member of that room. Don't put anything sensitive in a document title.
+
+**Sub-document sharing fan-out isn't atomic.** `DocShareDialog` invites/kicks a user from a parent doc's room, then fans that out to every descendant sub-document's room (`getDescendantRoomIds`) using `Promise.allSettled` — a partial failure only surfaces as a generic warning count, not which room failed. A failed *kick* fan-out is the more sensitive direction: a user removed from a parent document can be left with standing access to one of its sub-documents, with no automated alert or retry. See LIMIT-17 in [limitations.md](limitations.md).
+
+**Yjs update chunking has no cross-chunk authentication.** Large document updates are split into multiple Megolm-encrypted events sharing a `chunkId` (see `MatrixYjsProvider.sendChunked` in [architecture.md](architecture.md#docs-architecture)). Each chunk is independently authenticated by Megolm, but nothing binds a chunk to a specific position in a specific group beyond the plaintext `chunkIndex`/`chunkCount` fields inside that chunk's own ciphertext — a compromised member of the room (who has the Megolm session key like any other member) could in principle craft a competing chunk group with a colliding `chunkId`. This is a theoretical concern given the existing threat model already treats room members as trusted to hold the session key; it is not currently mitigated.
 
 ---
 

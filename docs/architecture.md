@@ -194,11 +194,75 @@ Event types are derived at runtime from each entity config's `eventTypePrefix`. 
 | Pattern | Example | Room | Purpose | Encrypted |
 |---|---|---|---|---|
 | `<prefix>.update` | `org.demo-e2e-app.contact.update` | Data room | Full entity snapshot (latest wins) | Yes (Megolm) |
-| `<prefix>.file` | `org.demo-e2e-app.contact.file` | Data room | File attachment metadata | Yes (Megolm) — metadata only; file bytes are unencrypted |
+| `<prefix>.file` | `org.demo-e2e-app.contact.file` | Data room | File attachment metadata | Yes (Megolm) — metadata only; file bytes are separately AES-256-CTR encrypted (`attachment-crypto.ts`) |
 | `m.room.message` | `m.room.message` | Comments room | Comment text | Yes (Megolm) |
 | `<prefix>_index` | `org.demo-e2e-app.contact_index` | `account_data` | Entity index (room IDs, display names) | No |
 
 All custom event types are sent using `(client as any).sendEvent(...)` to bypass Matrix SDK v41's strict `TimelineEvents` union type constraint. See `src/matrix/entity-events.ts`.
+
+Docs uses its own, separately-defined event types — see [Docs Architecture](#docs-architecture) below for the full table.
+
+---
+
+## Docs Architecture
+
+Docs is the second app built on top of the same login/crypto layer as the CRM, but it makes different structural choices — one room per document (not two), a CRDT (Yjs) instead of latest-write-wins snapshots, and a hybrid ownership model where hierarchy is private but mirrored into room state for collaborators. `docs/index.md`'s Quick Source Links table lists every file referenced below.
+
+### One room per document
+
+**Decision:** Each document is a single encrypted Matrix room (`createDocRoom`, `src/matrix/docs-matrix.ts`), created with `m.room.encryption` and a `DOC_META_STATE_TYPE` state event carrying `{ title, parentDocId, docId }`. That one room carries three kinds of content:
+
+- Yjs CRDT updates/snapshots (`DOC_YJS_UPDATE_EVENT` / `DOC_YJS_SNAPSHOT_EVENT`) — the document body.
+- Comments (`m.room.message` with `content.doc_comment: true` and `content.doc_id`) — sent directly by `DocCommentsSidebar`, no dedicated comments room.
+- The `DOC_META_STATE_TYPE` state event — title/parent, kept in sync by `setDocMeta` whenever the owner renames or moves the doc.
+
+**Why one room, unlike the CRM's data+comments split (ADR-2)?** The CRM splits rooms so an entity's comments can be shared independently of its data. Docs doesn't offer that distinction — sharing a document always shares its discussion — so a single room avoids double room-creation latency and rate-limit exposure for every new doc (see `createRoomWithRetry` below).
+
+**Trade-off:** Comments cannot be shared or restricted separately from content, and both share the same Megolm session/timeline growth profile.
+
+### Hierarchy: private index + mirrored room state
+
+Document hierarchy (nesting, ordering, titles) is authoritative in the owner's `account_data` under `DOCS_INDEX_EVENT_TYPE` (`org.demo-e2e-app.docs_index`) — a flat array of `DocIndexEntry { docId, roomId, title, parentDocId, order, createdAt }`, turned into a tree client-side by `buildTree` (`src/stores/docs.store.ts`).
+
+Collaborators a document is shared with cannot read the owner's private `account_data`, so they'd otherwise see no title and no place in the hierarchy. `loadSharedDocs` (`src/matrix/docs-matrix.ts`) works around this by scanning every joined room for a `DOC_META_STATE_TYPE` state event and reconstructing a `DocIndexEntry` from it — using the state event's own timestamp as a synthetic `order`. Every mutation that touches title or parent (`renameDoc`, `moveDoc` in `docs.store.ts`) therefore writes twice: once to the owner's private index, once via `setDocMeta` into the room's state, so collaborators' view stays consistent with the owner's.
+
+**Consequence:** A document's position in *your own* tree and its position in a *collaborator's* "Shared with me" tree are derived from two different sources of truth that happen to be kept in sync by convention, not by a single write path. See LIMIT-16 in [limitations.md](limitations.md).
+
+### CRDT sync over chunked Matrix events
+
+`MatrixYjsProvider` (`src/matrix/yjs-matrix-provider.ts`) bridges a Yjs `Y.Doc` to the doc's Matrix room:
+
+- Every local edit batches into `pendingUpdates`, debounced 300 ms, then merged (`Y.mergeUpdates`) and sent as one `DOC_YJS_UPDATE_EVENT`.
+- Every `SNAPSHOT_INTERVAL` (20) updates, the full merged Yjs state is also sent as a `DOC_YJS_SNAPSHOT_EVENT`, so a fresh load only has to decrypt the latest snapshot plus updates newer than it — not the entire room history. This depends on fewer distinct Megolm sessions, which shrinks the odds that one lost/undelivered session key makes the whole document appear empty.
+- **Chunking:** Matrix enforces a hard 65536-byte limit on the whole serialized event (PDU), and in an encrypted room that budget has to survive two layers of base64 inflation (our own encoding of the raw Yjs bytes, then Megolm's encoding of the ciphertext). `splitIntoChunks` caps raw payloads at 24 KB per chunk — comfortably under the ~44 KB worst-case inflated size — tagging each chunk with a shared `chunkId`/`chunkIndex`/`chunkCount` so `ChunkReassembler` can reconstitute them on the reading side (used both by live sync in `handleMatrixEvent` and by history replay in `loadInternal`). An incomplete chunk group (one chunk missing or undecryptable) is treated as if none of it arrived, rather than applying a truncated byte stream.
+- **Empty-state guards:** `isEmptyState()` probes a candidate update against a scratch `Y.Doc` before treating it as authoritative. `sendSnapshot()` refuses to publish an empty snapshot (a real document's latest snapshot should never look wiped out), and `loadInternal()` independently discards an empty snapshot read from history as a read-time backstop for snapshots persisted before that write-time guard existed.
+- **New-member resnapshot:** A newly-joined room member has none of the room's historical Megolm sessions and cannot benefit from key backup (which only recovers keys a device once had, not ones it was never given). `onMembership` responds to a join by resetting `updatesSinceSnapshot` and immediately sending a fresh snapshot, encrypted to a Megolm session that includes the new member — giving them something decryptable instead of an empty document.
+- **Load path:** `loadInternal()` calls `scrollback(room, 500)` to pull full room history (the initial sync's `initialSyncLimit: 20` would otherwise truncate it), force-decrypts any still-encrypted events, then replays the latest usable snapshot plus subsequent updates into the `Y.Doc`.
+- **Sync state UI:** Two independently-tracked booleans back the "Synced / Saving… / Updating… / Failed to sync" indicator in `DocEditorPage`: `isSyncing` (local edits not yet confirmed persisted — set from `onYjsUpdate` through `flush()`) and `isReceiving` (a live remote event has arrived but not finished decrypting — set from `onTimelineEvent`, cleared once `handleMatrixEvent` or a decryption-failure settles it). A client with nothing local to send can still correctly show "Updating…" while catching up on someone else's edit.
+- **Retry on send failure:** `flush()` re-queues the merged update and retries on a 3 s timer if the `sendEvent` call fails, rather than dropping the edit.
+
+### Sharing and sub-document fan-out
+
+Since sub-documents are independent Matrix rooms (not nested within a parent room), sharing a parent doesn't implicitly grant access to its children. Two code paths keep access consistent:
+
+1. **At share time** — `DocShareDialog.handleShare` invites the target user to the doc's own room, then fans the invite out to every existing descendant (`getDescendantRoomIds`), skipping rooms the target is already in/invited to. `handleRemove` mirrors this for kicks, so removing someone from a parent also removes them from its sub-docs — otherwise it would silently leave them with access. Both fan-outs use `Promise.allSettled` and surface a warning if any individual sub-doc invite/kick fails, rather than failing the whole action.
+2. **At creation time** — `createDoc` (`src/stores/docs.store.ts`), after the new sub-doc's room exists, looks up the parent doc's room and invites everyone who's currently a member (join or invite) of it. This covers documents created *after* a share, which the share-time fan-out above can't reach since it only runs once, at share time.
+
+**Known fragility:** There is no single source of truth for "who has access to this doc tree" — it's the union of whatever fan-outs have run correctly since the tree was created. A sub-doc moved to a different parent after creation does not retroactively adjust its membership. See LIMIT-17 in [limitations.md](limitations.md).
+
+### Retry on room-creation rate limits
+
+`createRoomWithRetry` (`src/matrix/docs-matrix.ts`) wraps `client.createRoom` in a loop that calls `calculateRetryBackoff` (a `matrix-js-sdk` helper) on failure: it reads the server's recommended `retry_after_ms` for `M_LIMIT_EXCEEDED` errors and returns `-1` for anything else, which is rethrown immediately without retrying. Without this, creating several documents in quick succession (a root doc, then a child, then a grandchild — each its own room) surfaces to the user as the new doc briefly appearing as "Untitled" in the tree and then vanishing, since `createDoc`'s `.catch()` drops the optimistic entry on any room-creation failure.
+
+### Docs Event Type Registry
+
+| Event | Room | Purpose | Encrypted |
+|---|---|---|---|
+| `org.demo-e2e-app.doc.yjs.update` | Doc room | Incremental Yjs CRDT update (base64, possibly chunked) | Yes (Megolm) |
+| `org.demo-e2e-app.doc.yjs.snapshot` | Doc room | Full merged Yjs state, sent every 20 updates and on new-member join | Yes (Megolm) |
+| `org.demo-e2e-app.doc.meta` (state event) | Doc room | `{ title, parentDocId, docId }` — lets collaborators derive title/hierarchy without the owner's private index | No (Matrix state events cannot be encrypted) |
+| `m.room.message` (`doc_comment: true`) | Doc room | Comment text | Yes (Megolm) |
+| `org.demo-e2e-app.docs_index` | `account_data` | Owner's private hierarchy index (`DocIndexEntry[]`) | No |
 
 ---
 

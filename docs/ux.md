@@ -9,15 +9,19 @@ Frontend contributor reference. Covers routing, layout, loading states, forms, f
 Defined in `src/App.tsx`.
 
 ```
+/                           → HomePage (feature picker: CRM vs Docs)
 /login                      → LoginPage
-/                           → redirect to /contacts
+/docs                       → AppLayout > DocsLayout > DocsHomePage
+/docs/:docId                → AppLayout > DocsLayout > DocEditorPage
 /:entityType                → AppLayout > EntityLayout > EntityListPage
 /:entityType/new            → AppLayout > EntityLayout > NewEntityPage
 /:entityType/:entityId      → AppLayout > EntityLayout > EntityDetailPage
-* (catch-all)               → redirect to /contacts
+* (catch-all)               → redirect to /
 ```
 
 `entityType` is the `urlSegment` from the entity config (e.g. `contacts`, `companies`, `trainings`). Pages resolve the config via `getEntityConfigBySegment(entityType)` from the registry.
+
+Unlike the CRM routes, `/docs` does not redirect from `/` — `HomePage` (`src/pages/HomePage.tsx`) is its own route that links to both `/contacts` and `/docs`, since Docs and the CRM are peer features rather than one being the app's default.
 
 ### Auth guard behaviour in `AppLayout`
 
@@ -185,6 +189,53 @@ A fixed-position overlay (bottom-right, `z-50`, `w-96`) rendered by `AppLayout`.
 | `"cancelled"` | Red "Verification was cancelled or failed" message |
 
 Step badge color: yellow (pending), blue (sas), green (done), red (cancelled).
+
+---
+
+## Docs
+
+### Layout
+
+**File:** `src/features/docs/DocsLayout.tsx`
+
+Two-panel layout: a resizable left panel (`DocTree`, 160–480px, default 260px, dragged via a `role="separator"` handle) and a right `<Outlet>` for `DocsHomePage` or `DocEditorPage`. On mount it calls `loadDocs(client)` once, then re-runs it (debounced 300 ms) on `ClientEvent.Room`, `RoomMemberEvent.Membership`, and `RoomStateEvent.Events` (filtered to `DOC_META_STATE_TYPE`) — this is what makes a newly-shared document appear in "Shared with me" without a page reload, unlike the CRM's reliance on the general sync-driven `hydrateFromMatrix` debounce.
+
+### Document Tree
+
+**File:** `src/features/docs/DocTree.tsx`, `src/features/docs/DocTreeItem.tsx`
+
+Renders two trees: the user's own documents (`getTree()`, full CRUD + drag reorder) and "Shared with me" (`getSharedTree()`, read-only except for a "Remove from Shared with me" action that leaves the room). Each own-tree item (`DocTreeItem`) supports, via hover-revealed icon buttons:
+
+- **New sub-page** (`+`) — creates a child doc under the hovered node.
+- **Rename** (`✎`, or double-click the title) — inline text input, committed on blur/Enter.
+- **Delete** (`✕`) — `confirm()` dialog, then recursively deletes the node and all descendants (`deleteDoc` walks `parentDocId` links to build the removal set) and leaves their Matrix rooms.
+- **Drag handle** (`⠿`) — `@dnd-kit/sortable`; see LIMIT-15 in [limitations.md](limitations.md) for the root-only reorder caveat.
+
+A new document is created optimistically (visible in the tree immediately with `roomId: null`) while its Matrix room is created in the background; `DocEditorPage` shows a `CreatingState` skeleton ("Setting up encrypted room…") until the room ID resolves.
+
+### Document Editor
+
+**File:** `src/features/docs/DocEditorPage.tsx`
+
+A BlockNote (`@blocknote/mantine`) rich-text editor wired to Yjs via `useMatrixCollaboration` (see [architecture.md](architecture.md#docs-architecture)). Key UI details:
+
+- **Title** is an inline `<input>` in the header plus a duplicated large `contentEditable` `<h1>` in the document body — both write through `renameDoc` on blur. Both are `readOnly`/non-editable when the current user only has the doc via "Shared with me" (`isShared`).
+- **Load/sync status indicator** (`DocLoadStatus`) shows one of four states, checked in this precedence: `loading` (initial history replay) → `error` (retry button, reloads the page) → `isReceiving` ("Updating…", a remote edit is mid-decryption) → `isSyncing` ("Saving…", local edits not yet confirmed persisted) → `"Synced"`.
+- **Comments toggle** — a button with an animated ping badge when comments arrive while the sidebar is closed (`hasUnseenComments`, tracked via a `seenCount` high-water mark).
+- The editor itself is only mounted once `loadState === "loaded"` — a skeleton (four animated bars) renders while loading, and an error state blocks editing entirely rather than risk persisting edits on top of a partially-restored document.
+- Slash-menu (`/`) items come from `getDocsSlashMenuItems` (`blocknote-schema.tsx`), which adds custom blocks (callouts, multi-column layout, page break) alongside BlockNote's defaults.
+
+### Comments Sidebar
+
+**File:** `src/features/docs/DocCommentsSidebar.tsx`, `src/features/docs/useDocComments.ts`
+
+Unlike CRM comments (plain text in a dedicated comments room), doc comments are `m.room.message` events in the *same* room as the document content, tagged `doc_comment: true`. `useDocComments` re-derives the full comment list from the room's live timeline on every `RoomEvent.Timeline` and `MatrixEventEvent.Decrypted` event (no incremental append) and renders bodies through `react-markdown` with a small custom component set (bold/italic/code/lists/blockquotes/links — no images or tables).
+
+### Share Dialog (Docs)
+
+**File:** `src/features/docs/DocShareDialog.tsx`
+
+Structurally similar to the CRM's `ShareDialog` (native `<dialog>`, plain user-ID input) but adds a **live members list** — `refreshMembers()` reads `room.getMembers()` directly and re-runs on every `RoomMemberEvent.Membership`, showing each member's `join`/`invite` state with a per-member "Remove" (kick) button. Both invite and remove fan out to every descendant sub-document's room (see [architecture.md](architecture.md#docs-architecture)); partial fan-out failures surface as an amber warning (`shareWarning`) rather than blocking the primary action.
 
 ---
 
