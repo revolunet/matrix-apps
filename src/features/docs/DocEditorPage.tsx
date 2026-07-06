@@ -125,7 +125,7 @@ function DocEditorInner({ docId, roomId }: { docId: string; roomId: string }) {
           </div>
           <div className="flex items-center gap-2 flex-none">
             <DocLoadStatus state={loadState} />
-            <DocShareDialog roomId={roomId} />
+            <DocShareDialog docId={docId} roomId={roomId} />
             <button
               onClick={toggleComments}
               className={`relative text-sm px-3 py-1.5 rounded-lg border transition-colors ${

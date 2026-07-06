@@ -145,17 +145,28 @@ export async function reorderDocs(
 
 /**
  * Returns documents shared with the current user — i.e. Matrix rooms they're
- * a member of that contain a DOC_META_STATE_TYPE state event but are NOT in
- * the user's own docs index (those belong to someone else).
+ * a member of that contain a DOC_META_STATE_TYPE state event but are NOT
+ * among `ownRoomIds` (those belong to someone else).
+ *
+ * `ownRoomIds` is passed in rather than re-derived from account data here:
+ * account data is written via an async setAccountData() call, so a room
+ * just created by createDoc() may already exist locally (in the docs
+ * store's in-memory state) before that write round-trips. Re-reading
+ * account data fresh in this function would miss it and misclassify a
+ * brand-new own room as "shared with me" for however long that race window
+ * lasts. Callers should union the account-data index with whatever they
+ * already know locally.
  */
-export function loadSharedDocs(client: MatrixClient): DocIndexEntry[] {
-  const ownDocs = loadDocsIndex(client);
-  const ownRoomIds = new Set(ownDocs.map((d) => d.roomId).filter(Boolean));
+export function loadSharedDocs(
+  client: MatrixClient,
+  ownRoomIds: ReadonlySet<string> | string[],
+): DocIndexEntry[] {
+  const ownRoomIdSet = ownRoomIds instanceof Set ? ownRoomIds : new Set(ownRoomIds);
 
   const shared: DocIndexEntry[] = [];
 
   for (const room of client.getRooms()) {
-    if (ownRoomIds.has(room.roomId)) continue;
+    if (ownRoomIdSet.has(room.roomId)) continue;
     if (room.getMyMembership() !== "join") continue;
 
     const metaEvent = room.currentState.getStateEvents(DOC_META_STATE_TYPE, "");

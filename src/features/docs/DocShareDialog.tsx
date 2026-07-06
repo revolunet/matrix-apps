@@ -2,19 +2,23 @@ import { useEffect, useRef, useState } from "react";
 import { RoomMemberEvent } from "matrix-js-sdk";
 import type { MatrixEvent, RoomMember } from "matrix-js-sdk";
 import { useAuthStore } from "@/stores/auth.store";
+import { useDocsStore } from "@/stores/docs.store";
 
 interface Props {
+  docId: string;
   roomId: string;
 }
 
-export function DocShareDialog({ roomId }: Props) {
+export function DocShareDialog({ docId, roomId }: Props) {
   const dialogRef = useRef<HTMLDialogElement>(null);
   const client = useAuthStore((s) => s.client)!;
   const userId = useAuthStore((s) => s.userId);
+  const getDescendantRoomIds = useDocsStore((s) => s.getDescendantRoomIds);
 
   const [matrixUserId, setMatrixUserId] = useState("");
   const [sharing, setSharing] = useState(false);
   const [shareError, setShareError] = useState<string | null>(null);
+  const [shareWarning, setShareWarning] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
 
   const [members, setMembers] = useState<RoomMember[]>([]);
@@ -47,6 +51,7 @@ export function DocShareDialog({ roomId }: Props) {
   const open = () => {
     setMatrixUserId("");
     setShareError(null);
+    setShareWarning(null);
     setSuccess(false);
     setRemoveError(null);
     refreshMembers();
@@ -60,9 +65,27 @@ export function DocShareDialog({ roomId }: Props) {
     if (!target) return;
     setSharing(true);
     setShareError(null);
+    setShareWarning(null);
     setSuccess(false);
     try {
       await client.invite(roomId, target);
+
+      // Sub-docs are their own independent Matrix rooms — sharing the
+      // parent doesn't grant access to them, so fan the invite out to every
+      // descendant too. Skip rooms the target is already in to avoid
+      // "already in room" failures cluttering a routine re-share.
+      const descendantRoomIds = getDescendantRoomIds(docId).filter((rid) => {
+        const membership = client.getRoom(rid)?.getMember(target)?.membership;
+        return membership !== "join" && membership !== "invite";
+      });
+      const results = await Promise.allSettled(
+        descendantRoomIds.map((rid) => client.invite(rid, target)),
+      );
+      const failed = results.filter((r) => r.status === "rejected").length;
+      if (failed > 0) {
+        setShareWarning(`Shared, but failed to share ${failed} sub-document(s)`);
+      }
+
       setSuccess(true);
       setMatrixUserId("");
       refreshMembers();
@@ -74,11 +97,26 @@ export function DocShareDialog({ roomId }: Props) {
   };
 
   const handleRemove = async (targetUserId: string) => {
-    if (!confirm(`Remove ${targetUserId} from this document?`)) return;
+    if (!confirm(`Remove ${targetUserId} from this document and its sub-documents?`)) return;
     setRemoving(targetUserId);
     setRemoveError(null);
     try {
       await client.kick(roomId, targetUserId);
+
+      // Mirror handleShare's fan-out: leaving someone with access to
+      // sub-docs after they've been removed from the parent would be a
+      // silent access leak, not a feature gap.
+      const descendantRoomIds = getDescendantRoomIds(docId).filter((rid) => {
+        const membership = client.getRoom(rid)?.getMember(targetUserId)?.membership;
+        return membership === "join" || membership === "invite";
+      });
+      const results = await Promise.allSettled(
+        descendantRoomIds.map((rid) => client.kick(rid, targetUserId)),
+      );
+      const failed = results.filter((r) => r.status === "rejected").length;
+      if (failed > 0) {
+        setRemoveError(`Removed, but failed to remove from ${failed} sub-document(s)`);
+      }
     } catch (err) {
       setRemoveError(err instanceof Error ? err.message : "Failed to remove user");
     } finally {
@@ -122,6 +160,9 @@ export function DocShareDialog({ roomId }: Props) {
           </div>
 
           {shareError && <p className="text-xs text-red-500">{shareError}</p>}
+          {shareWarning && (
+            <p className="text-xs text-amber-600">{shareWarning}</p>
+          )}
           {success && (
             <p className="text-xs text-green-600">Invitation sent ✓</p>
           )}

@@ -41,6 +41,8 @@ interface DocsState {
   getDocById: (docId: string) => DocIndexEntry | undefined;
   getTree: () => DocTreeNode[];
   getSharedTree: () => DocTreeNode[];
+  /** Room IDs of every descendant of docId, across both owned and shared docs. */
+  getDescendantRoomIds: (docId: string) => string[];
 }
 
 function buildTree(docs: DocIndexEntry[]): DocTreeNode[] {
@@ -78,8 +80,19 @@ export const useDocsStore = create<DocsState>((set, get) => ({
 
   loadDocs: async (client) => {
     set({ loading: true });
-    const docs = loadDocsIndex(client);
-    const sharedDocs = loadSharedDocs(client);
+    const indexDocs = loadDocsIndex(client);
+
+    // account data is written async (setAccountData) — a doc just created
+    // by createDoc() may already be known locally, with its roomId set,
+    // before that write round-trips. Keep any such pending local entry the
+    // fresh index doesn't have yet, so it doesn't flicker out of the tree
+    // and so its room isn't wrongly counted as "shared" below.
+    const indexDocIds = new Set(indexDocs.map((d) => d.docId));
+    const pendingLocalDocs = get().docs.filter((d) => !indexDocIds.has(d.docId));
+    const docs = [...indexDocs, ...pendingLocalDocs];
+
+    const ownRoomIds = docs.map((d) => d.roomId).filter((id): id is string => !!id);
+    const sharedDocs = loadSharedDocs(client, ownRoomIds);
     set({ docs, sharedDocs, loading: false });
   },
 
@@ -105,12 +118,40 @@ export const useDocsStore = create<DocsState>((set, get) => ({
     // Create the Matrix room in the background, then persist using the store's
     // current state (not stale account-data) to avoid overwriting concurrent renames.
     void createDocRoom(client, docId, title, parentDocId ?? null, order, createdAt)
-      .then((roomId) => {
+      .then(async (roomId) => {
         set((s) => {
           const updated = s.docs.map((d) => (d.docId === docId ? { ...d, roomId } : d));
           void saveDocsIndex(client, persistableDocs(updated));
           return { docs: updated };
         });
+
+        // Sub-docs are their own independent Matrix rooms — inherit whoever
+        // currently has access to the parent so a doc shared earlier also
+        // covers documents created under it later, not just the ones that
+        // already existed at share time (see DocShareDialog for the
+        // opposite direction: sharing/unsharing an existing doc fanning out
+        // to its existing descendants).
+        const parentRoomId = parentDocId
+          ? get().docs.find((d) => d.docId === parentDocId)?.roomId
+          : null;
+        const parentRoom = parentRoomId ? client.getRoom(parentRoomId) : null;
+        if (parentRoom) {
+          const invitees = parentRoom
+            .getMembers()
+            .filter(
+              (m) =>
+                m.userId !== client.getUserId() &&
+                (m.membership === "join" || m.membership === "invite"),
+            );
+          await Promise.allSettled(
+            invitees.map((m) => client.invite(roomId, m.userId)),
+          ).then((results) => {
+            const failed = results.filter((r) => r.status === "rejected").length;
+            if (failed > 0) {
+              console.warn(`[docs] failed to inherit ${failed} of ${invitees.length} parent member(s) into new sub-doc`);
+            }
+          });
+        }
       })
       .catch((err) => {
         console.error("[docs] failed to create Matrix room:", err);
@@ -225,4 +266,21 @@ export const useDocsStore = create<DocsState>((set, get) => ({
   getTree: () => buildTree(get().docs),
 
   getSharedTree: () => buildTree(get().sharedDocs),
+
+  getDescendantRoomIds: (docId) => {
+    // A doc's children can show up in either index depending on who's
+    // asking (owner vs. collaborator), so search both rather than picking one.
+    const all = [...get().docs, ...get().sharedDocs];
+    const roomIds: string[] = [];
+    const queue = [docId];
+    while (queue.length) {
+      const id = queue.shift()!;
+      for (const d of all) {
+        if (d.parentDocId !== id) continue;
+        if (d.roomId) roomIds.push(d.roomId);
+        queue.push(d.docId);
+      }
+    }
+    return roomIds;
+  },
 }));
