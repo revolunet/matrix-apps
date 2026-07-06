@@ -15,6 +15,7 @@ import {
 import { getDocsSlashMenuItems } from "./blocknote-schema";
 import { DocCommentsSidebar } from "./DocCommentsSidebar";
 import { DocShareDialog } from "./DocShareDialog";
+import { useDocComments } from "./useDocComments";
 
 function DocLoadStatus({ state }: { state: DocLoadState }) {
   if (state === "loading") {
@@ -57,6 +58,20 @@ function DocEditorInner({ docId, roomId }: { docId: string; roomId: string }) {
   // Tracks whether the title input is mid-edit so the sync effect below
   // doesn't clobber unsaved keystrokes when a remote rename arrives.
   const titleFocusedRef = useRef(false);
+
+  // Subscribed regardless of whether the sidebar is open, so the header
+  // button can flag incoming comments even while it's closed.
+  const comments = useDocComments(client, roomId);
+  const [seenCount, setSeenCount] = useState(comments.length);
+  const hasUnseenComments = !showComments && comments.length > seenCount;
+
+  const toggleComments = () => {
+    setShowComments((v) => {
+      const next = !v;
+      if (next) setSeenCount(comments.length);
+      return next;
+    });
+  };
 
   // Keyed on roomId — fresh Y.Doc + provider per room
   const { editor, loadState } = useMatrixCollaboration(roomId);
@@ -112,14 +127,20 @@ function DocEditorInner({ docId, roomId }: { docId: string; roomId: string }) {
             <DocLoadStatus state={loadState} />
             <DocShareDialog roomId={roomId} />
             <button
-              onClick={() => setShowComments((v) => !v)}
-              className={`text-sm px-3 py-1.5 rounded-lg border transition-colors ${
+              onClick={toggleComments}
+              className={`relative text-sm px-3 py-1.5 rounded-lg border transition-colors ${
                 showComments
                   ? "border-blue-300 bg-blue-50 text-blue-700"
                   : "border-gray-200 text-gray-600 hover:border-gray-400"
               }`}
             >
               💬 Comments
+              {hasUnseenComments && (
+                <span className="absolute -top-1 -right-1 flex h-2.5 w-2.5">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75" />
+                  <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-blue-500" />
+                </span>
+              )}
             </button>
           </div>
         </div>
@@ -191,7 +212,11 @@ function DocEditorInner({ docId, roomId }: { docId: string; roomId: string }) {
 
       {/* Comments sidebar */}
       {showComments && doc && (
-        <DocCommentsSidebar doc={doc} onClose={() => setShowComments(false)} />
+        <DocCommentsSidebar
+          doc={doc}
+          comments={comments}
+          onClose={() => setShowComments(false)}
+        />
       )}
     </div>
   );

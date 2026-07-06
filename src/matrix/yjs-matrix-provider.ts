@@ -31,6 +31,25 @@ function fromBase64(str: string): Uint8Array {
   return bytes;
 }
 
+// Must match the fragment key BlockNote's collaboration config binds to
+// (see useMatrixCollaboration.ts: ydoc.getXmlFragment("document-store")).
+const DOCUMENT_FRAGMENT_KEY = "document-store";
+
+/**
+ * True if applying `update` produces a document with no top-level content.
+ * Used to stop an empty state from ever being treated as authoritative over
+ * real content — see the guards in sendSnapshot() and loadInternal() below.
+ */
+function isEmptyState(update: Uint8Array): boolean {
+  const probe = new Y.Doc();
+  try {
+    Y.applyUpdate(probe, update);
+    return probe.getXmlFragment(DOCUMENT_FRAGMENT_KEY).length === 0;
+  } finally {
+    probe.destroy();
+  }
+}
+
 /**
  * A Yjs provider that persists updates via Matrix room events.
  *
@@ -163,15 +182,28 @@ export class MatrixYjsProvider {
       }
     }
 
-    const updates: Uint8Array[] = [];
+    let snapshotState: Uint8Array | null = null;
     if (latestSnapshotContent?.state) {
       try {
-        updates.push(fromBase64(latestSnapshotContent.state));
+        snapshotState = fromBase64(latestSnapshotContent.state);
       } catch {
         // skip malformed snapshot
       }
     }
-    const relevantUpdates = updateEvents.filter((e) => e.getTs() > latestSnapshotTs);
+
+    // A snapshot that decodes to an empty document can never legitimately
+    // supersede real prior content — if it did, whoever sent it would have
+    // had nothing to encode in the first place. Treat it as if it weren't
+    // there rather than let it silently hide everything before it (this is
+    // a read-time backstop for snapshots persisted before sendSnapshot()
+    // gained the equivalent write-time guard).
+    const snapshotIsEmpty = snapshotState !== null && isEmptyState(snapshotState);
+    const updates: Uint8Array[] = [];
+    if (snapshotState && !snapshotIsEmpty) {
+      updates.push(snapshotState);
+    }
+    const effectiveSnapshotTs = snapshotIsEmpty ? -Infinity : latestSnapshotTs;
+    const relevantUpdates = updateEvents.filter((e) => e.getTs() > effectiveSnapshotTs);
     for (const event of relevantUpdates) {
       const content = event.getContent() as { update?: string };
       if (!content.update) continue;
@@ -201,12 +233,18 @@ export class MatrixYjsProvider {
   handleMatrixEvent = (event: MatrixEvent): void => {
     if (this.destroyed) return;
     if (event.getRoomId() !== this.roomId) return;
-    if (event.getType() !== DOC_YJS_UPDATE_EVENT) return;
+    const type = event.getType();
+    if (type !== DOC_YJS_UPDATE_EVENT && type !== DOC_YJS_SNAPSHOT_EVENT) return;
     if (event.isBeingDecrypted() || event.isDecryptionFailure()) return;
-    const content = event.getContent() as { update?: string };
-    if (!content.update) return;
+    // A snapshot's `state` is a full Y-doc state encoded the same way as an
+    // incremental `update` — applying it merges in fine, and is exactly what
+    // rescues a new member whose load() already resolved empty just before
+    // onMembership's fresh snapshot was sent (see onMembership below).
+    const content = event.getContent() as { update?: string; state?: string };
+    const encoded = type === DOC_YJS_SNAPSHOT_EVENT ? content.state : content.update;
+    if (!encoded) return;
     try {
-      const update = fromBase64(content.update);
+      const update = fromBase64(encoded);
       // Yjs deduplicates updates already in the state vector, so applying an
       // update that was also picked up by load() is safe and is a no-op.
       Y.applyUpdate(this.doc, update, this);
@@ -280,6 +318,13 @@ export class MatrixYjsProvider {
   private async sendSnapshot(): Promise<void> {
     try {
       const state = Y.encodeStateAsUpdate(this.doc);
+      // Never persist an empty snapshot: loadInternal() (and, before this
+      // fix, older clients still trusting a stale snapshot) treats the
+      // latest snapshot as authoritative and discards all updates before
+      // it — an empty one here would make a real document look wiped out
+      // to anyone loading it fresh. A doc with genuinely nothing in it has
+      // nothing worth snapshotting anyway.
+      if (isEmptyState(state)) return;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       await (this.client as any).sendEvent(
         this.roomId,

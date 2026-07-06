@@ -1,57 +1,42 @@
 import { useState } from "react";
+import ReactMarkdown from "react-markdown";
 import { useAuthStore } from "@/stores/auth.store";
+import type { DocComment } from "./useDocComments";
 import type { DocIndexEntry } from "@/matrix/docs-matrix";
 
-interface Comment {
-  id: string;
-  authorId: string;
-  body: string;
-  createdAt: string;
-}
-
-function extractComments(
-  client: ReturnType<typeof useAuthStore>["client"],
-  roomId: string,
-): Comment[] {
-  if (!client) return [];
-  const room = client.getRoom(roomId);
-  if (!room) return [];
-  const events = room.getLiveTimeline().getEvents();
-  const comments: Comment[] = [];
-  for (const event of events) {
-    if (event.getType() !== "m.room.message") continue;
-    if (event.isBeingDecrypted() || event.isDecryptionFailure()) continue;
-    const content = event.getContent() as {
-      msgtype?: string;
-      body?: string;
-      doc_comment?: boolean;
-    };
-    if (content.msgtype !== "m.text" || !content.doc_comment) continue;
-    const id = event.getId();
-    const authorId = event.getSender();
-    if (!id || !authorId || !content.body) continue;
-    comments.push({
-      id,
-      authorId,
-      body: content.body,
-      createdAt: new Date(event.getTs()).toISOString(),
-    });
-  }
-  return comments;
-}
+const markdownComponents = {
+  p: ({ children }: { children?: React.ReactNode }) => <p className="mb-1 last:mb-0">{children}</p>,
+  a: ({ href, children }: { href?: string; children?: React.ReactNode }) => (
+    <a href={href} className="text-blue-600 underline" target="_blank" rel="noopener noreferrer">
+      {children}
+    </a>
+  ),
+  code: ({ children }: { children?: React.ReactNode }) => (
+    <code className="bg-gray-100 px-1 rounded text-xs font-mono">{children}</code>
+  ),
+  pre: ({ children }: { children?: React.ReactNode }) => (
+    <pre className="bg-gray-100 p-2 rounded text-xs font-mono overflow-x-auto my-1">{children}</pre>
+  ),
+  strong: ({ children }: { children?: React.ReactNode }) => <strong className="font-semibold">{children}</strong>,
+  em: ({ children }: { children?: React.ReactNode }) => <em className="italic">{children}</em>,
+  ul: ({ children }: { children?: React.ReactNode }) => <ul className="list-disc list-inside my-1 space-y-0.5">{children}</ul>,
+  ol: ({ children }: { children?: React.ReactNode }) => <ol className="list-decimal list-inside my-1 space-y-0.5">{children}</ol>,
+  blockquote: ({ children }: { children?: React.ReactNode }) => (
+    <blockquote className="border-l-2 border-gray-300 pl-3 text-gray-500 my-1">{children}</blockquote>
+  ),
+};
 
 interface Props {
   doc: DocIndexEntry;
+  comments: DocComment[];
   onClose: () => void;
 }
 
-export function DocCommentsSidebar({ doc, onClose }: Props) {
-  const client = useAuthStore((s) => s.client);
+export function DocCommentsSidebar({ doc, comments, onClose }: Props) {
+  const client = useAuthStore((s) => s.client)!;
   const userId = useAuthStore((s) => s.userId);
   const [body, setBody] = useState("");
   const [sending, setSending] = useState(false);
-
-  const comments = extractComments(client, doc.roomId);
 
   const handleSend = async () => {
     const trimmed = body.trim();
@@ -107,7 +92,9 @@ export function DocCommentsSidebar({ doc, onClose }: Props) {
                   })}
                 </span>
               </div>
-              <p className="text-sm text-gray-700 whitespace-pre-wrap">{c.body}</p>
+              <div className="text-sm text-gray-700">
+                <ReactMarkdown components={markdownComponents}>{c.body}</ReactMarkdown>
+              </div>
             </div>
           ))
         )}

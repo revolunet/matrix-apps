@@ -24,15 +24,18 @@ function SharedDocTreeItem({
   node,
   depth = 0,
   onRemove,
+  removingId,
 }: {
   node: DocTreeNode;
   depth?: number;
   onRemove: (docId: string, title: string) => void;
+  removingId: string | null;
 }) {
   const [isExpanded, setIsExpanded] = useState(true);
   const [showActions, setShowActions] = useState(false);
   const hasChildren = node.children.length > 0;
   const paddingLeft = 12 + depth * 16;
+  const isRemoving = removingId === node.docId;
 
   return (
     <div>
@@ -58,17 +61,22 @@ function SharedDocTreeItem({
         >
           {node.title}
         </NavLink>
-        {showActions && (
-          <button
-            onClick={(e) => {
-              e.stopPropagation();
-              onRemove(node.docId, node.title);
-            }}
-            className="p-0.5 rounded hover:bg-red-100 text-gray-400 hover:text-red-600 text-xs flex-none"
-            title="Remove from Shared with me"
-          >
-            ✕
-          </button>
+        {isRemoving ? (
+          <span className="text-xs text-gray-400 flex-none">Removing…</span>
+        ) : (
+          showActions && (
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                onRemove(node.docId, node.title);
+              }}
+              disabled={removingId !== null}
+              className="p-0.5 rounded hover:bg-red-100 text-gray-400 hover:text-red-600 text-xs flex-none disabled:opacity-40"
+              title="Remove from Shared with me"
+            >
+              ✕
+            </button>
+          )
         )}
       </div>
       {hasChildren && isExpanded && (
@@ -79,6 +87,7 @@ function SharedDocTreeItem({
               node={child}
               depth={depth + 1}
               onRemove={onRemove}
+              removingId={removingId}
             />
           ))}
         </div>
@@ -104,6 +113,7 @@ export function DocTree() {
 
   const [creating, setCreating] = useState(false);
   const [newTitle, setNewTitle] = useState("");
+  const [removingSharedId, setRemovingSharedId] = useState<string | null>(null);
 
   const tree = getTree();
   const sharedTree = getSharedTree();
@@ -153,9 +163,19 @@ export function DocTree() {
     navigate(`/docs/${entry.docId}`);
   };
 
-  const handleRemoveShared = (docId: string, title: string) => {
+  const handleRemoveShared = async (docId: string, title: string) => {
     if (!confirm(`Remove "${title}" from Shared with me?`)) return;
-    void removeSharedDoc(client, docId);
+    setRemovingSharedId(docId);
+    try {
+      // Awaited so the room-leave request has actually gone out before the
+      // button clears — firing-and-forgetting it left a window where a
+      // reload right after clicking could abort the request mid-flight,
+      // leaving the doc still joined server-side and reappearing in Shared
+      // with me until a later sync happened to correct it.
+      await removeSharedDoc(client, docId);
+    } finally {
+      setRemovingSharedId(null);
+    }
     navigate("/docs");
   };
 
@@ -257,6 +277,7 @@ export function DocTree() {
                 node={node}
                 depth={0}
                 onRemove={handleRemoveShared}
+                removingId={removingSharedId}
               />
             ))}
           </div>
