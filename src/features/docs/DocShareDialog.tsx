@@ -74,6 +74,7 @@ export function DocShareDialog({ roomId }: Props) {
   };
 
   const handleRemove = async (targetUserId: string) => {
+    if (!confirm(`Remove ${targetUserId} from this document?`)) return;
     setRemoving(targetUserId);
     setRemoveError(null);
     try {

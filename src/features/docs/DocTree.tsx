@@ -19,17 +19,28 @@ import { useAuthStore } from "@/stores/auth.store";
 import { DocTreeItem } from "./DocTreeItem";
 import type { DocIndexEntry } from "@/matrix/docs-matrix";
 
-/** Read-only tree item for shared documents — no dnd, no edit actions. */
-function SharedDocTreeItem({ node, depth = 0 }: { node: DocTreeNode; depth?: number }) {
+/** Read-only tree item for shared documents — no dnd, no rename/create actions. */
+function SharedDocTreeItem({
+  node,
+  depth = 0,
+  onRemove,
+}: {
+  node: DocTreeNode;
+  depth?: number;
+  onRemove: (docId: string, title: string) => void;
+}) {
   const [isExpanded, setIsExpanded] = useState(true);
+  const [showActions, setShowActions] = useState(false);
   const hasChildren = node.children.length > 0;
   const paddingLeft = 12 + depth * 16;
 
   return (
     <div>
       <div
-        className="flex items-center gap-1 pr-1 rounded hover:bg-gray-100"
+        className="group flex items-center gap-1 pr-1 rounded hover:bg-gray-100"
         style={{ paddingLeft }}
+        onMouseEnter={() => setShowActions(true)}
+        onMouseLeave={() => setShowActions(false)}
       >
         <button
           onClick={() => setIsExpanded((v) => !v)}
@@ -47,11 +58,28 @@ function SharedDocTreeItem({ node, depth = 0 }: { node: DocTreeNode; depth?: num
         >
           {node.title}
         </NavLink>
+        {showActions && (
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              onRemove(node.docId, node.title);
+            }}
+            className="p-0.5 rounded hover:bg-red-100 text-gray-400 hover:text-red-600 text-xs flex-none"
+            title="Remove from Shared with me"
+          >
+            ✕
+          </button>
+        )}
       </div>
       {hasChildren && isExpanded && (
         <div>
           {node.children.map((child) => (
-            <SharedDocTreeItem key={child.docId} node={child} depth={depth + 1} />
+            <SharedDocTreeItem
+              key={child.docId}
+              node={child}
+              depth={depth + 1}
+              onRemove={onRemove}
+            />
           ))}
         </div>
       )}
@@ -67,6 +95,7 @@ export function DocTree() {
     loading,
     createDoc,
     deleteDoc,
+    removeSharedDoc,
     renameDoc,
     reorderDocs,
     getTree,
@@ -122,6 +151,12 @@ export function DocTree() {
   const handleAddChild = (parentDocId: string) => {
     const entry = createDoc(client, "Untitled", parentDocId);
     navigate(`/docs/${entry.docId}`);
+  };
+
+  const handleRemoveShared = (docId: string, title: string) => {
+    if (!confirm(`Remove "${title}" from Shared with me?`)) return;
+    void removeSharedDoc(client, docId);
+    navigate("/docs");
   };
 
   const rootIds = docs
@@ -217,7 +252,12 @@ export function DocTree() {
               </span>
             </div>
             {sharedTree.map((node) => (
-              <SharedDocTreeItem key={node.docId} node={node} depth={0} />
+              <SharedDocTreeItem
+                key={node.docId}
+                node={node}
+                depth={0}
+                onRemove={handleRemoveShared}
+              />
             ))}
           </div>
         )}

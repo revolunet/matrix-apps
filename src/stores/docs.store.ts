@@ -27,6 +27,8 @@ interface DocsState {
     parentDocId?: string | null,
   ) => DocIndexEntry;
   deleteDoc: (client: MatrixClient, docId: string) => Promise<void>;
+  /** Leaves the Matrix room(s) for a doc shared with the current user, removing it from "Shared with me". */
+  removeSharedDoc: (client: MatrixClient, docId: string) => Promise<void>;
   renameDoc: (client: MatrixClient, docId: string, title: string) => Promise<void>;
   moveDoc: (
     client: MatrixClient,
@@ -119,20 +121,58 @@ export const useDocsStore = create<DocsState>((set, get) => ({
   },
 
   deleteDoc: async (client, docId) => {
-    // Compute the new docs list first, then persist it — avoids re-reading
-    // potentially stale account data from the client.
-    set((s) => {
-      const toRemove = new Set<string>();
-      const queue = [docId];
-      while (queue.length) {
-        const id = queue.shift()!;
-        toRemove.add(id);
-        s.docs.filter((d) => d.parentDocId === id).forEach((d) => queue.push(d.docId));
-      }
-      const updated = s.docs.filter((d) => !toRemove.has(d.docId));
-      void saveDocsIndex(client, persistableDocs(updated));
-      return { docs: updated };
-    });
+    const docs = get().docs;
+    const toRemove = new Set<string>();
+    const queue = [docId];
+    while (queue.length) {
+      const id = queue.shift()!;
+      toRemove.add(id);
+      docs.filter((d) => d.parentDocId === id).forEach((d) => queue.push(d.docId));
+    }
+    const roomIds = docs
+      .filter((d) => toRemove.has(d.docId) && d.roomId)
+      .map((d) => d.roomId as string);
+
+    const updated = docs.filter((d) => !toRemove.has(d.docId));
+    set({ docs: updated });
+    await saveDocsIndex(client, persistableDocs(updated));
+
+    // Also leave the rooms — otherwise we stay a joined member with no
+    // index entry, so loadSharedDocs() misclassifies the deleted doc as
+    // "shared with me" on the very next sync.
+    await Promise.all(
+      roomIds.map((roomId) =>
+        client.leave(roomId).catch((err) =>
+          console.warn("[docs] failed to leave deleted doc's room:", err),
+        ),
+      ),
+    );
+  },
+
+  removeSharedDoc: async (client, docId) => {
+    const shared = get().sharedDocs;
+    const toRemove = new Set<string>();
+    const queue = [docId];
+    while (queue.length) {
+      const id = queue.shift()!;
+      toRemove.add(id);
+      shared.filter((d) => d.parentDocId === id).forEach((d) => queue.push(d.docId));
+    }
+    const roomIds = shared
+      .filter((d) => toRemove.has(d.docId) && d.roomId)
+      .map((d) => d.roomId as string);
+
+    set((s) => ({
+      sharedDocs: s.sharedDocs.filter((d) => !toRemove.has(d.docId)),
+    }));
+
+    await Promise.all(
+      roomIds.map((roomId) =>
+        client.leave(roomId).catch((err) =>
+          console.warn("[docs] failed to leave shared room:", err),
+        ),
+      ),
+    );
   },
 
   renameDoc: async (client, docId, title) => {

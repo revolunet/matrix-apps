@@ -41,6 +41,7 @@ export function SharedWithList({ dataRoomId, commentsRoomId }: Props) {
   }, [client, dataRoomId, userId]);
 
   const handleRemove = async (targetUserId: string) => {
+    if (!confirm(`Remove ${targetUserId}'s access?`)) return;
     setRemoving(targetUserId);
     setError(null);
     try {

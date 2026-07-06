@@ -2,6 +2,8 @@ import "@blocknote/mantine/style.css";
 
 import { useEffect, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
+import { filterSuggestionItems } from "@blocknote/core/extensions";
+import { SuggestionMenuController } from "@blocknote/react";
 import { BlockNoteView } from "@blocknote/mantine";
 import { MantineProvider } from "@mantine/core";
 import { useDocsStore } from "@/stores/docs.store";
@@ -10,6 +12,7 @@ import {
   useMatrixCollaboration,
   type DocLoadState,
 } from "./useMatrixCollaboration";
+import { getDocsSlashMenuItems } from "./blocknote-schema";
 import { DocCommentsSidebar } from "./DocCommentsSidebar";
 import { DocShareDialog } from "./DocShareDialog";
 
@@ -145,7 +148,15 @@ function DocEditorInner({ docId, roomId }: { docId: string; roomId: string }) {
                   editor={editor}
                   theme="light"
                   className="min-h-64"
-                />
+                  slashMenu={false}
+                >
+                  <SuggestionMenuController
+                    triggerCharacter="/"
+                    getItems={async (query) =>
+                      filterSuggestionItems(getDocsSlashMenuItems(editor), query)
+                    }
+                  />
+                </BlockNoteView>
               ) : loadState === "error" ? (
                 // Editing stays blocked here rather than falling back to an
                 // empty editor — typing on top of a doc that may only be

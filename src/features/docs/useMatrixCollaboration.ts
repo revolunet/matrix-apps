@@ -1,17 +1,27 @@
 import { useEffect, useRef, useState } from "react";
 import * as Y from "yjs";
 import { MatrixEventEvent } from "matrix-js-sdk";
+import type { MatrixClient } from "matrix-js-sdk";
 import { useCreateBlockNote } from "@blocknote/react";
 import { useAuthStore } from "@/stores/auth.store";
 import { MatrixYjsProvider } from "@/matrix/yjs-matrix-provider";
-import type { BlockNoteEditor } from "@blocknote/core";
+import {
+  encryptAttachment,
+  decryptAttachment,
+  type EncryptedFileInfo,
+} from "@/matrix/attachment-crypto";
+import { docsBlockNoteSchema, docsDictionary } from "./blocknote-schema";
 
-// Cache blob URLs per mxc:// URI — avoids re-fetching on every render
+// Cache blob URLs per stored reference (mxc:// URI, or our encrypted-ref
+// string) — avoids re-fetching/re-decrypting on every render
 const blobUrlCache = new Map<string, string>();
 
 /**
  * Fetches Matrix media with auth headers and returns a local blob URL.
  * Tries the authenticated endpoint first (MSC3916), falls back to legacy.
+ *
+ * Only used for `mxc://` references stored before attachment encryption was
+ * introduced — new uploads always go through fetchAndDecryptAttachment below.
  */
 async function fetchMxcAsBlob(
   mxcUrl: string,
@@ -43,6 +53,64 @@ async function fetchMxcAsBlob(
   }
 }
 
+// Marks a stored BlockNote file url as one of our encrypted attachments,
+// distinguishing it from a bare (legacy, unencrypted) mxc:// reference.
+const ENCRYPTED_REF_PREFIX = "matrix-enc:";
+
+interface StoredEncryptedFile extends EncryptedFileInfo {
+  url: string; // mxc:// pointer to the ciphertext blob
+  mimetype: string;
+}
+
+function encodeEncryptedRef(file: StoredEncryptedFile): string {
+  return ENCRYPTED_REF_PREFIX + encodeURIComponent(JSON.stringify(file));
+}
+
+function decodeEncryptedRef(ref: string): StoredEncryptedFile | null {
+  if (!ref.startsWith(ENCRYPTED_REF_PREFIX)) return null;
+  try {
+    return JSON.parse(decodeURIComponent(ref.slice(ENCRYPTED_REF_PREFIX.length)));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Downloads the ciphertext blob referenced by an encrypted attachment ref,
+ * decrypts it client-side, and returns a local blob URL. The media repo only
+ * ever sees/stores the ciphertext — the key/iv travel solely inside the
+ * E2E-encrypted room event (see attachment-crypto.ts).
+ */
+async function fetchAndDecryptAttachment(
+  ref: string,
+  file: StoredEncryptedFile,
+  client: MatrixClient,
+): Promise<string> {
+  const cached = blobUrlCache.get(ref);
+  if (cached) return cached;
+
+  const httpUrl = client.mxcUrlToHttp(
+    file.url, undefined, undefined, undefined, undefined, undefined, true,
+  );
+  if (!httpUrl) throw new Error("Could not resolve attachment media URL");
+
+  const accessToken = client.getAccessToken() ?? "";
+  const tryFetch = async (headers?: HeadersInit) => {
+    const r = await fetch(httpUrl, { headers });
+    return r.ok ? r : null;
+  };
+  const response =
+    (await tryFetch({ Authorization: `Bearer ${accessToken}` })) ?? (await tryFetch());
+  if (!response) throw new Error("Failed to download attachment ciphertext");
+
+  const ciphertext = await response.arrayBuffer();
+  const plaintext = await decryptAttachment(ciphertext, file);
+  const blob = new Blob([plaintext], { type: file.mimetype || "application/octet-stream" });
+  const objectUrl = URL.createObjectURL(blob);
+  blobUrlCache.set(ref, objectUrl);
+  return objectUrl;
+}
+
 function getUserColor(userId: string): string {
   let hash = 0;
   for (let i = 0; i < userId.length; i++) {
@@ -59,10 +127,7 @@ function getUserColor(userId: string): string {
  */
 export type DocLoadState = "loading" | "loaded" | "error";
 
-export function useMatrixCollaboration(roomId: string): {
-  editor: BlockNoteEditor;
-  loadState: DocLoadState;
-} {
+export function useMatrixCollaboration(roomId: string) {
   const client = useAuthStore((s) => s.client);
   const userId = useAuthStore((s) => s.userId) ?? "Anonymous";
 
@@ -124,6 +189,8 @@ export function useMatrixCollaboration(roomId: string): {
 
   const editor = useCreateBlockNote(
     {
+      schema: docsBlockNoteSchema,
+      dictionary: docsDictionary,
       collaboration: {
         // providerRef.current is null on the very first render (before the
         // effect fires). Awareness/cursors won't work for that brief window,
@@ -132,28 +199,40 @@ export function useMatrixCollaboration(roomId: string): {
         fragment: ydoc.getXmlFragment("document-store"),
         user: { name: userId, color: getUserColor(userId) },
       },
-      // Upload to Matrix, then immediately download as blob so it's cached
-      // before BlockNote tries to display it. The mxc:// URI is what gets
-      // stored in Yjs so all collaborators share the same stable reference.
+      // Encrypt client-side (AES-256-CTR) before it ever leaves the browser,
+      // then upload only the ciphertext to Matrix — the media repo never
+      // sees plaintext file bytes. The resulting ref (mxc:// pointer + key/iv
+      // + mimetype) is what gets stored in Yjs, so it only ever travels
+      // inside E2E-encrypted room events, same as the rest of the doc content.
       uploadFile: client
         ? async (file: File) => {
-            const { content_uri } = await client.uploadContent(file);
-            // useAuthentication=true → /_matrix/client/v1/media/download/ (Matrix 1.11+)
-            // so the subsequent fetch with the Bearer token actually succeeds on
-            // servers like matrix.org that have disabled the unauthenticated endpoint.
-            const httpUrl = client.mxcUrlToHttp(
-              content_uri, undefined, undefined, undefined, undefined, undefined, true,
-            );
-            if (httpUrl) {
-              // Pre-warm the cache — resolveFileUrl will hit it synchronously
-              void fetchMxcAsBlob(content_uri, httpUrl, client.getAccessToken() ?? "");
-            }
-            return content_uri;
+            const data = await file.arrayBuffer();
+            const { ciphertext, info } = await encryptAttachment(data);
+            // includeFilename: false — don't leak the original filename to the
+            // (untrusted) media repo alongside the ciphertext.
+            const { content_uri } = await client.uploadContent(ciphertext, {
+              type: "application/octet-stream",
+              includeFilename: false,
+            });
+            const stored: StoredEncryptedFile = {
+              ...info,
+              url: content_uri,
+              mimetype: file.type || "application/octet-stream",
+            };
+            const ref = encodeEncryptedRef(stored);
+            // Pre-warm the cache — resolveFileUrl will hit it synchronously
+            void fetchAndDecryptAttachment(ref, stored, client).catch(() => {});
+            return ref;
           }
         : undefined,
-      // Called by BlockNote before rendering any file URL — convert mxc:// → blob URL
+      // Called by BlockNote before rendering any file URL — decrypt our
+      // encrypted refs, or fall back to a plain authenticated fetch for
+      // mxc:// URIs stored before attachment encryption was introduced.
       resolveFileUrl: client
         ? async (url: string) => {
+            const stored = decodeEncryptedRef(url);
+            if (stored) return fetchAndDecryptAttachment(url, stored, client);
+
             if (!url.startsWith("mxc://")) return url;
             const httpUrl = client.mxcUrlToHttp(
               url, undefined, undefined, undefined, undefined, undefined, true,
