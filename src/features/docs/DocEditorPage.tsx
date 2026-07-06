@@ -20,9 +20,11 @@ import { useDocComments } from "./useDocComments";
 function DocLoadStatus({
   loadState,
   isSyncing,
+  isReceiving,
 }: {
   loadState: DocLoadState;
   isSyncing: boolean;
+  isReceiving: boolean;
 }) {
   if (loadState === "loading") {
     return (
@@ -41,9 +43,22 @@ function DocLoadStatus({
     );
   }
   // loadState === "loaded" only means the initial history replay finished —
-  // it says nothing about edits made since, so "Synced" also waits on
-  // isSyncing (whether the provider still has local changes not yet
-  // confirmed persisted to Matrix; see MatrixYjsProvider.onSyncStateChange).
+  // it says nothing about edits made since, so "Synced" also waits on:
+  // - isReceiving: a remote revision is known to exist (a live event
+  //   arrived) but hasn't finished decrypting/applying yet — see
+  //   MatrixYjsProvider.onReceivingStateChange. Checked first since a doc
+  //   that's still catching up on someone else's edit isn't "Synced" even
+  //   if this client has nothing of its own to send.
+  // - isSyncing: this client has local changes not yet confirmed persisted
+  //   to Matrix — see MatrixYjsProvider.onSyncStateChange.
+  if (isReceiving) {
+    return (
+      <span className="flex items-center gap-1.5 text-xs text-amber-600">
+        <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse" />
+        Updating…
+      </span>
+    );
+  }
   if (isSyncing) {
     return (
       <span className="flex items-center gap-1.5 text-xs text-amber-600">
@@ -92,7 +107,7 @@ function DocEditorInner({ docId, roomId }: { docId: string; roomId: string }) {
   };
 
   // Keyed on roomId — fresh Y.Doc + provider per room
-  const { editor, loadState, isSyncing } = useMatrixCollaboration(roomId);
+  const { editor, loadState, isSyncing, isReceiving } = useMatrixCollaboration(roomId);
 
   // doc.title only reflects a remote rename (e.g. the owner renaming from
   // another session, or a collaborator's live-refreshed shared-doc state) —
@@ -142,7 +157,7 @@ function DocEditorInner({ docId, roomId }: { docId: string; roomId: string }) {
             />
           </div>
           <div className="flex items-center gap-2 flex-none">
-            <DocLoadStatus loadState={loadState} isSyncing={isSyncing} />
+            <DocLoadStatus loadState={loadState} isSyncing={isSyncing} isReceiving={isReceiving} />
             <DocShareDialog docId={docId} roomId={roomId} />
             <button
               onClick={toggleComments}

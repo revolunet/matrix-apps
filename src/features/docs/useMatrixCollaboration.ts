@@ -148,6 +148,9 @@ export function useMatrixCollaboration(roomId: string) {
   // Tracks unsaved local edits, separately from loadState (which only covers
   // the initial history replay) — see MatrixYjsProvider.onSyncStateChange.
   const [isSyncing, setIsSyncing] = useState(false);
+  // Tracks a *remote* revision known to exist (a live event arrived) but not
+  // yet decrypted/applied — see MatrixYjsProvider.onReceivingStateChange.
+  const [isReceiving, setIsReceiving] = useState(false);
 
   useEffect(() => {
     if (!client) return;
@@ -160,6 +163,8 @@ export function useMatrixCollaboration(roomId: string) {
     providerRef.current = provider;
     setIsSyncing(provider.isSyncing());
     provider.onSyncStateChange = setIsSyncing;
+    setIsReceiving(provider.isReceiving());
+    provider.onReceivingStateChange = setIsReceiving;
 
     provider.awareness.setLocalStateField("user", {
       name: userId,
@@ -186,6 +191,7 @@ export function useMatrixCollaboration(roomId: string) {
     return () => {
       client.off(MatrixEventEvent.Decrypted, onDecrypted);
       provider.onSyncStateChange = null;
+      provider.onReceivingStateChange = null;
       providerRef.current = null;
       provider.destroy();
     };
@@ -251,5 +257,5 @@ export function useMatrixCollaboration(roomId: string) {
     [],
   );
 
-  return { editor, loadState, isSyncing };
+  return { editor, loadState, isSyncing, isReceiving };
 }

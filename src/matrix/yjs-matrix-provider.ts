@@ -1,7 +1,7 @@
 import * as Y from "yjs";
 import { v4 as uuidv4 } from "uuid";
 import { Awareness } from "y-protocols/awareness";
-import { ClientEvent, RoomMemberEvent } from "matrix-js-sdk";
+import { ClientEvent, RoomEvent, RoomMemberEvent } from "matrix-js-sdk";
 import type { MatrixClient, MatrixEvent, Room, RoomMember } from "matrix-js-sdk";
 
 export const DOC_YJS_UPDATE_EVENT = "org.demo-e2e-app.doc.yjs.update";
@@ -152,6 +152,18 @@ export class MatrixYjsProvider {
   private readonly liveUpdateChunks = new ChunkReassembler();
   private readonly liveSnapshotChunks = new ChunkReassembler();
 
+  // Event ids of live (post-load) events in this room that arrived encrypted
+  // and haven't finished decrypting yet — i.e. a revision we know exists but
+  // haven't been able to apply. `syncing` alone can't capture this: it only
+  // ever flips true for *this client's own* unflushed edits (onYjsUpdate
+  // ignores updates applied with origin === this, which is what
+  // handleMatrixEvent uses for remote content — see there). Without this,
+  // a client with nothing of its own to send always reads "Synced" even
+  // while a remote edit is still waiting on decryption/key delivery.
+  private readonly pendingReceiveIds = new Set<string>();
+  private receiving = false;
+  onReceivingStateChange: ((receiving: boolean) => void) | null = null;
+
   private setSyncing(value: boolean): void {
     if (this.syncing === value) return;
     this.syncing = value;
@@ -162,6 +174,23 @@ export class MatrixYjsProvider {
     return this.syncing;
   }
 
+  private setReceiving(value: boolean): void {
+    if (this.receiving === value) return;
+    this.receiving = value;
+    this.onReceivingStateChange?.(value);
+  }
+
+  isReceiving(): boolean {
+    return this.receiving;
+  }
+
+  /** Stops tracking `eventId` as a pending incoming revision, if it was one. */
+  private settleReceive(eventId: string | undefined): void {
+    if (eventId === undefined) return;
+    if (!this.pendingReceiveIds.delete(eventId)) return;
+    if (this.pendingReceiveIds.size === 0) this.setReceiving(false);
+  }
+
   constructor(ydoc: Y.Doc, roomId: string, client: MatrixClient) {
     this.doc = ydoc;
     this.roomId = roomId;
@@ -169,7 +198,31 @@ export class MatrixYjsProvider {
     this.awareness = new Awareness(ydoc);
     this.doc.on("update", this.onYjsUpdate);
     this.client.on(RoomMemberEvent.Membership, this.onMembership);
+    this.client.on(RoomEvent.Timeline, this.onTimelineEvent);
   }
+
+  /**
+   * Flags a live incoming event as a pending revision the moment it shows up
+   * still encrypted, well before `handleMatrixEvent` gets a chance to apply
+   * it (that only runs once MatrixEventEvent.Decrypted fires). Restricted to
+   * events after the initial load (`this.loaded`) — history replay is
+   * already handled synchronously by loadInternal().
+   */
+  private onTimelineEvent = (
+    event: MatrixEvent,
+    room: Room | undefined,
+    toStartOfTimeline: boolean | undefined,
+    removed: boolean,
+  ): void => {
+    if (this.destroyed || !this.loaded) return;
+    if (removed || toStartOfTimeline) return;
+    if (room?.roomId !== this.roomId) return;
+    if (!event.isEncrypted() || !event.isBeingDecrypted()) return;
+    const id = event.getId();
+    if (id === undefined) return;
+    this.pendingReceiveIds.add(id);
+    this.setReceiving(true);
+  };
 
   async load(): Promise<void> {
     try {
@@ -336,6 +389,12 @@ export class MatrixYjsProvider {
   handleMatrixEvent = (event: MatrixEvent): void => {
     if (this.destroyed) return;
     if (event.getRoomId() !== this.roomId) return;
+    // Keep it pending if a retry is queued (isDecryptionFailure() with
+    // shouldAttemptDecryption() true) — we'll get another Decrypted
+    // notification once that retry lands, whether it succeeds or gives up.
+    if (!event.isBeingDecrypted() && !(event.isDecryptionFailure() && event.shouldAttemptDecryption())) {
+      this.settleReceive(event.getId());
+    }
     const type = event.getType();
     if (type !== DOC_YJS_UPDATE_EVENT && type !== DOC_YJS_SNAPSHOT_EVENT) return;
     if (event.isBeingDecrypted() || event.isDecryptionFailure()) return;
@@ -493,6 +552,7 @@ export class MatrixYjsProvider {
     // Remove listener first so no new updates are queued after this point
     this.doc.off("update", this.onYjsUpdate);
     this.client.off(RoomMemberEvent.Membership, this.onMembership);
+    this.client.off(RoomEvent.Timeline, this.onTimelineEvent);
     if (this.sendTimer) {
       clearTimeout(this.sendTimer);
       this.sendTimer = null;

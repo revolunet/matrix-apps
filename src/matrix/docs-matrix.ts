@@ -1,5 +1,5 @@
-import type { MatrixClient } from "matrix-js-sdk";
-import { Preset } from "matrix-js-sdk";
+import type { ICreateRoomOpts, MatrixClient } from "matrix-js-sdk";
+import { calculateRetryBackoff, Preset } from "matrix-js-sdk";
 import { APP_PREFIX } from "@/lib/constants";
 
 export const DOCS_INDEX_EVENT_TYPE = "org.demo-e2e-app.docs_index";
@@ -37,6 +37,32 @@ export async function saveDocsIndex(
   await (client as any).setAccountData(DOCS_INDEX_EVENT_TYPE, index);
 }
 
+/**
+ * matrix.org (and any homeserver enforcing rate limits) can reject room
+ * creation with M_LIMIT_EXCEEDED when several docs are created in quick
+ * succession — e.g. a root doc, then a child, then a grandchild, each
+ * spawning its own room (see README's "matrix.org rate limits" warning).
+ * Without a retry, that surfaces to the user as the new doc briefly
+ * appearing as "Untitled" and then vanishing (see the .catch() in
+ * docs.store.ts's createDoc, which drops the optimistic entry on failure).
+ * calculateRetryBackoff reads the server's recommended retry_after_ms for
+ * rate-limit errors and returns -1 for anything else not worth retrying.
+ */
+async function createRoomWithRetry(
+  client: MatrixClient,
+  opts: ICreateRoomOpts,
+): ReturnType<MatrixClient["createRoom"]> {
+  for (let attempts = 1; ; attempts++) {
+    try {
+      return await client.createRoom(opts);
+    } catch (err) {
+      const delayMs = calculateRetryBackoff(err, attempts, false);
+      if (delayMs < 0) throw err;
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+}
+
 /** Creates the encrypted Matrix room for a doc and persists the index entry. */
 export async function createDocRoom(
   client: MatrixClient,
@@ -47,7 +73,7 @@ export async function createDocRoom(
   createdAt: string,
 ): Promise<string> {
   const roomName = `${APP_PREFIX}/docs/${docId}`;
-  const resp = await client.createRoom({
+  const resp = await createRoomWithRetry(client, {
     name: roomName,
     preset: Preset.PrivateChat,
     initial_state: [
