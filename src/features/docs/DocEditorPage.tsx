@@ -17,8 +17,14 @@ import { DocCommentsSidebar } from "./DocCommentsSidebar";
 import { DocShareDialog } from "./DocShareDialog";
 import { useDocComments } from "./useDocComments";
 
-function DocLoadStatus({ state }: { state: DocLoadState }) {
-  if (state === "loading") {
+function DocLoadStatus({
+  loadState,
+  isSyncing,
+}: {
+  loadState: DocLoadState;
+  isSyncing: boolean;
+}) {
+  if (loadState === "loading") {
     return (
       <span className="flex items-center gap-1.5 text-xs text-gray-400">
         <span className="w-1.5 h-1.5 rounded-full bg-gray-400 animate-pulse" />
@@ -26,11 +32,23 @@ function DocLoadStatus({ state }: { state: DocLoadState }) {
       </span>
     );
   }
-  if (state === "error") {
+  if (loadState === "error") {
     return (
       <span className="flex items-center gap-1.5 text-xs text-red-500">
         <span className="w-1.5 h-1.5 rounded-full bg-red-500" />
         Failed to sync
+      </span>
+    );
+  }
+  // loadState === "loaded" only means the initial history replay finished —
+  // it says nothing about edits made since, so "Synced" also waits on
+  // isSyncing (whether the provider still has local changes not yet
+  // confirmed persisted to Matrix; see MatrixYjsProvider.onSyncStateChange).
+  if (isSyncing) {
+    return (
+      <span className="flex items-center gap-1.5 text-xs text-amber-600">
+        <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse" />
+        Saving…
       </span>
     );
   }
@@ -74,7 +92,7 @@ function DocEditorInner({ docId, roomId }: { docId: string; roomId: string }) {
   };
 
   // Keyed on roomId — fresh Y.Doc + provider per room
-  const { editor, loadState } = useMatrixCollaboration(roomId);
+  const { editor, loadState, isSyncing } = useMatrixCollaboration(roomId);
 
   // doc.title only reflects a remote rename (e.g. the owner renaming from
   // another session, or a collaborator's live-refreshed shared-doc state) —
@@ -124,7 +142,7 @@ function DocEditorInner({ docId, roomId }: { docId: string; roomId: string }) {
             />
           </div>
           <div className="flex items-center gap-2 flex-none">
-            <DocLoadStatus state={loadState} />
+            <DocLoadStatus loadState={loadState} isSyncing={isSyncing} />
             <DocShareDialog docId={docId} roomId={roomId} />
             <button
               onClick={toggleComments}

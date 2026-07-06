@@ -145,6 +145,9 @@ export function useMatrixCollaboration(roomId: string) {
   const providerRef = useRef<MatrixYjsProvider | null>(null);
 
   const [loadState, setLoadState] = useState<DocLoadState>("loading");
+  // Tracks unsaved local edits, separately from loadState (which only covers
+  // the initial history replay) — see MatrixYjsProvider.onSyncStateChange.
+  const [isSyncing, setIsSyncing] = useState(false);
 
   useEffect(() => {
     if (!client) return;
@@ -155,6 +158,8 @@ export function useMatrixCollaboration(roomId: string) {
     // replacement with its own un-destroyed onYjsUpdate listener on the ydoc).
     const provider = new MatrixYjsProvider(ydoc, roomId, client);
     providerRef.current = provider;
+    setIsSyncing(provider.isSyncing());
+    provider.onSyncStateChange = setIsSyncing;
 
     provider.awareness.setLocalStateField("user", {
       name: userId,
@@ -180,6 +185,7 @@ export function useMatrixCollaboration(roomId: string) {
 
     return () => {
       client.off(MatrixEventEvent.Decrypted, onDecrypted);
+      provider.onSyncStateChange = null;
       providerRef.current = null;
       provider.destroy();
     };
@@ -245,5 +251,5 @@ export function useMatrixCollaboration(roomId: string) {
     [],
   );
 
-  return { editor, loadState };
+  return { editor, loadState, isSyncing };
 }

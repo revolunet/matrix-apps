@@ -1,4 +1,5 @@
 import * as Y from "yjs";
+import { v4 as uuidv4 } from "uuid";
 import { Awareness } from "y-protocols/awareness";
 import { ClientEvent, RoomMemberEvent } from "matrix-js-sdk";
 import type { MatrixClient, MatrixEvent, Room, RoomMember } from "matrix-js-sdk";
@@ -29,6 +30,67 @@ function fromBase64(str: string): Uint8Array {
     bytes[i] = binary.charCodeAt(i);
   }
   return bytes;
+}
+
+// Matrix's max PDU size is a hard, server-enforced 65536 bytes for the
+// *whole* serialized event — not something we can raise. In an encrypted
+// room that budget has to survive two layers of base64 inflation: our own
+// encoding of the raw Yjs bytes, then Megolm's encoding of the encrypted
+// blob of the JSON event (which embeds our already-base64'd string) — worst
+// case close to 1.8x the raw byte count, before event/room/sender metadata
+// overhead. Chunking raw payloads at 24KB keeps the inflated result under
+// ~44KB, leaving comfortable headroom.
+const MAX_CHUNK_BYTES = 24 * 1024;
+
+function splitIntoChunks(bytes: Uint8Array, maxBytes: number): Uint8Array[] {
+  if (bytes.byteLength <= maxBytes) return [bytes];
+  const chunks: Uint8Array[] = [];
+  for (let offset = 0; offset < bytes.byteLength; offset += maxBytes) {
+    chunks.push(bytes.subarray(offset, offset + maxBytes));
+  }
+  return chunks;
+}
+
+interface ChunkedEventContent {
+  update?: string;
+  state?: string;
+  chunkId?: string;
+  chunkIndex?: number;
+  chunkCount?: number;
+}
+
+/**
+ * Reassembles chunked update/snapshot events (see MatrixYjsProvider.sendChunked)
+ * back into the complete byte array they were split from. A single instance
+ * can track multiple in-flight chunk groups (keyed by chunkId) concurrently.
+ */
+class ChunkReassembler {
+  private groups = new Map<string, (Uint8Array | undefined)[]>();
+
+  /** Returns the reassembled bytes once every chunk of this group has arrived, else null. */
+  addChunk(chunkId: string, index: number, count: number, bytes: Uint8Array): Uint8Array | null {
+    let slots = this.groups.get(chunkId);
+    if (!slots) {
+      // .fill(undefined) matters: a bare `new Array(count)` leaves holes,
+      // which Array#some/#reduce silently skip over (unlike the `for...of`
+      // below, which does visit them) — that mismatch let an incomplete
+      // group look "complete" as soon as the first chunk arrived.
+      slots = new Array(count).fill(undefined);
+      this.groups.set(chunkId, slots);
+    }
+    slots[index] = bytes;
+    if (slots.some((s) => s === undefined)) return null;
+
+    this.groups.delete(chunkId);
+    const total = slots.reduce((n, s) => n + s!.byteLength, 0);
+    const combined = new Uint8Array(total);
+    let offset = 0;
+    for (const s of slots) {
+      combined.set(s!, offset);
+      offset += s!.byteLength;
+    }
+    return combined;
+  }
 }
 
 // Must match the fragment key BlockNote's collaboration config binds to
@@ -77,6 +139,28 @@ export class MatrixYjsProvider {
   // to Matrix before load() runs, polluting the room with a stale snapshot
   // that then conflicts with the real content on the next reload.
   private loaded = false;
+  // True whenever there's local content not yet confirmed persisted to
+  // Matrix — either still buffered in pendingUpdates waiting out the
+  // debounce, or in the middle of/retrying a flush(). The UI's "Synced"
+  // indicator is driven off this rather than off `loaded`, since `loaded`
+  // only reflects the *initial* load and says nothing about edits made
+  // since.
+  private syncing = false;
+  onSyncStateChange: ((syncing: boolean) => void) | null = null;
+  // Reassemble chunked events arriving live (loadInternal uses its own
+  // short-lived reassemblers for the one-off history replay).
+  private readonly liveUpdateChunks = new ChunkReassembler();
+  private readonly liveSnapshotChunks = new ChunkReassembler();
+
+  private setSyncing(value: boolean): void {
+    if (this.syncing === value) return;
+    this.syncing = value;
+    this.onSyncStateChange?.(value);
+  }
+
+  isSyncing(): boolean {
+    return this.syncing;
+  }
 
   constructor(ydoc: Y.Doc, roomId: string, client: MatrixClient) {
     this.doc = ydoc;
@@ -167,27 +251,52 @@ export class MatrixYjsProvider {
     // most recent one. Everything it encodes is already folded into its
     // state, so we only need incremental updates newer than it — the older
     // ones (and their Megolm sessions) can be ignored entirely.
-    let latestSnapshotContent: { state?: string } | null = null;
+    //
+    // A large update/snapshot may be split across several chunked events
+    // (see sendChunked) — reassemble those before anything else. A chunk
+    // group that never completes (a chunk missing/undecryptable) is treated
+    // as if none of its chunks were there at all, rather than partially
+    // applying a truncated byte stream.
+    const snapshotChunks = new ChunkReassembler();
+    const updateChunks = new ChunkReassembler();
+    let latestSnapshotState: Uint8Array | null = null;
     let latestSnapshotTs = -Infinity;
-    const updateEvents: MatrixEvent[] = [];
+    const updateRecords: { ts: number; bytes: Uint8Array }[] = [];
     for (const event of allEvents) {
       const type = event.getType();
       if (type !== DOC_YJS_UPDATE_EVENT && type !== DOC_YJS_SNAPSHOT_EVENT) continue;
       if (event.isDecryptionFailure()) continue;
+
+      const content = event.getContent() as ChunkedEventContent;
+      const encoded = type === DOC_YJS_SNAPSHOT_EVENT ? content.state : content.update;
+      if (!encoded) continue;
+      let bytes: Uint8Array;
+      try {
+        bytes = fromBase64(encoded);
+      } catch {
+        continue;
+      }
+      if (
+        content.chunkId !== undefined &&
+        content.chunkIndex !== undefined &&
+        content.chunkCount !== undefined
+      ) {
+        const reassembler = type === DOC_YJS_SNAPSHOT_EVENT ? snapshotChunks : updateChunks;
+        const complete = reassembler.addChunk(
+          content.chunkId,
+          content.chunkIndex,
+          content.chunkCount,
+          bytes,
+        );
+        if (!complete) continue;
+        bytes = complete;
+      }
+
       if (type === DOC_YJS_SNAPSHOT_EVENT) {
-        latestSnapshotContent = event.getContent() as { state?: string };
+        latestSnapshotState = bytes;
         latestSnapshotTs = event.getTs();
       } else {
-        updateEvents.push(event);
-      }
-    }
-
-    let snapshotState: Uint8Array | null = null;
-    if (latestSnapshotContent?.state) {
-      try {
-        snapshotState = fromBase64(latestSnapshotContent.state);
-      } catch {
-        // skip malformed snapshot
+        updateRecords.push({ ts: event.getTs(), bytes });
       }
     }
 
@@ -197,21 +306,15 @@ export class MatrixYjsProvider {
     // there rather than let it silently hide everything before it (this is
     // a read-time backstop for snapshots persisted before sendSnapshot()
     // gained the equivalent write-time guard).
-    const snapshotIsEmpty = snapshotState !== null && isEmptyState(snapshotState);
+    const snapshotIsEmpty = latestSnapshotState !== null && isEmptyState(latestSnapshotState);
     const updates: Uint8Array[] = [];
-    if (snapshotState && !snapshotIsEmpty) {
-      updates.push(snapshotState);
+    if (latestSnapshotState && !snapshotIsEmpty) {
+      updates.push(latestSnapshotState);
     }
     const effectiveSnapshotTs = snapshotIsEmpty ? -Infinity : latestSnapshotTs;
-    const relevantUpdates = updateEvents.filter((e) => e.getTs() > effectiveSnapshotTs);
-    for (const event of relevantUpdates) {
-      const content = event.getContent() as { update?: string };
-      if (!content.update) continue;
-      try {
-        updates.push(fromBase64(content.update));
-      } catch {
-        // skip malformed events
-      }
+    const relevantUpdates = updateRecords.filter((r) => r.ts > effectiveSnapshotTs);
+    for (const r of relevantUpdates) {
+      updates.push(r.bytes);
     }
     this.updatesSinceSnapshot = relevantUpdates.length;
 
@@ -240,14 +343,29 @@ export class MatrixYjsProvider {
     // incremental `update` — applying it merges in fine, and is exactly what
     // rescues a new member whose load() already resolved empty just before
     // onMembership's fresh snapshot was sent (see onMembership below).
-    const content = event.getContent() as { update?: string; state?: string };
+    const content = event.getContent() as ChunkedEventContent;
     const encoded = type === DOC_YJS_SNAPSHOT_EVENT ? content.state : content.update;
     if (!encoded) return;
+    let bytes: Uint8Array;
     try {
-      const update = fromBase64(encoded);
+      bytes = fromBase64(encoded);
+    } catch {
+      return;
+    }
+    if (
+      content.chunkId !== undefined &&
+      content.chunkIndex !== undefined &&
+      content.chunkCount !== undefined
+    ) {
+      const reassembler = type === DOC_YJS_SNAPSHOT_EVENT ? this.liveSnapshotChunks : this.liveUpdateChunks;
+      const complete = reassembler.addChunk(content.chunkId, content.chunkIndex, content.chunkCount, bytes);
+      if (!complete) return; // wait for the rest of this chunk group
+      bytes = complete;
+    }
+    try {
       // Yjs deduplicates updates already in the state vector, so applying an
       // update that was also picked up by load() is safe and is a no-op.
-      Y.applyUpdate(this.doc, update, this);
+      Y.applyUpdate(this.doc, bytes, this);
     } catch {
       // ignore
     }
@@ -282,9 +400,43 @@ export class MatrixYjsProvider {
     // empty-paragraph initialisation happens here and must not be persisted).
     if (!this.loaded) return;
     this.pendingUpdates.push(update);
+    this.setSyncing(true);
     if (this.sendTimer) clearTimeout(this.sendTimer);
     this.sendTimer = setTimeout(() => this.flush(), 300);
   };
+
+  /**
+   * Sends `bytes` as one or more `eventType` room events, splitting into
+   * MAX_CHUNK_BYTES pieces (tagged with a shared chunkId/index/count) when
+   * it's too large for a single event — see the reassembly logic in
+   * loadInternal() and handleMatrixEvent(). Chunks are sent sequentially so
+   * a failure partway through doesn't race a later chunk ahead of an
+   * earlier one.
+   */
+  private async sendChunked(
+    eventType: string,
+    field: "update" | "state",
+    bytes: Uint8Array,
+  ): Promise<void> {
+    const chunks = splitIntoChunks(bytes, MAX_CHUNK_BYTES);
+    if (chunks.length === 1) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (this.client as any).sendEvent(this.roomId, eventType, {
+        [field]: toBase64(chunks[0]),
+      });
+      return;
+    }
+    const chunkId = uuidv4();
+    for (let i = 0; i < chunks.length; i++) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (this.client as any).sendEvent(this.roomId, eventType, {
+        [field]: toBase64(chunks[i]),
+        chunkId,
+        chunkIndex: i,
+        chunkCount: chunks.length,
+      });
+    }
+  }
 
   private async flush(): Promise<void> {
     this.sendTimer = null;
@@ -293,16 +445,18 @@ export class MatrixYjsProvider {
     const merged =
       updates.length === 1 ? updates[0] : Y.mergeUpdates(updates);
     try {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      await (this.client as any).sendEvent(
-        this.roomId,
-        DOC_YJS_UPDATE_EVENT,
-        { update: toBase64(merged) },
-      );
+      await this.sendChunked(DOC_YJS_UPDATE_EVENT, "update", merged);
       this.updatesSinceSnapshot++;
       if (this.updatesSinceSnapshot >= SNAPSHOT_INTERVAL) {
         this.updatesSinceSnapshot = 0;
         void this.sendSnapshot();
+      }
+      // Only "synced" if nothing else queued up while this send was in
+      // flight (a keystroke mid-flush already pushed a new pendingUpdates
+      // entry and armed a fresh sendTimer, so this stays true until that
+      // one flushes too).
+      if (this.pendingUpdates.length === 0 && !this.sendTimer) {
+        this.setSyncing(false);
       }
     } catch (err) {
       console.warn("[yjs-matrix] failed to send update:", err);
@@ -312,6 +466,7 @@ export class MatrixYjsProvider {
       if (!this.destroyed) {
         this.sendTimer = setTimeout(() => this.flush(), 3000);
       }
+      // Still unsaved — stays true through the retry backoff.
     }
   }
 
@@ -325,12 +480,7 @@ export class MatrixYjsProvider {
       // to anyone loading it fresh. A doc with genuinely nothing in it has
       // nothing worth snapshotting anyway.
       if (isEmptyState(state)) return;
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      await (this.client as any).sendEvent(
-        this.roomId,
-        DOC_YJS_SNAPSHOT_EVENT,
-        { state: toBase64(state) },
-      );
+      await this.sendChunked(DOC_YJS_SNAPSHOT_EVENT, "state", state);
     } catch (err) {
       console.warn("[yjs-matrix] failed to send snapshot:", err);
       // Non-fatal — the incremental updates already sent are enough to
