@@ -11,6 +11,7 @@ registerEntity({
   type: "training",
   label: "Training",
   pluralLabel: "Trainings",
+  icon: "📚",
   urlSegment: "trainings",
   schema: TrainingSchema,
   formSchema: TrainingFormSchema,

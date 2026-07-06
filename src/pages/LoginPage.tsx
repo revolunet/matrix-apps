@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { login, register } from "@/matrix/auth";
+import { login, register, getLastUsername } from "@/matrix/auth";
 import { createMatrixClient, startMatrixClient } from "@/matrix/client";
 import { useAuthStore } from "@/stores/auth.store";
 import { getHomeserverUrl, setHomeserverUrl } from "@/lib/constants";
@@ -21,7 +21,7 @@ export function LoginPage() {
   const [mode, setMode] = useState<Mode>("login");
 
   // Login / Register fields
-  const [username, setUsername] = useState("");
+  const [username, setUsername] = useState(getLastUsername);
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [error, setError] = useState<string | null>(null);

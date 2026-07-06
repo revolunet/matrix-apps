@@ -85,8 +85,6 @@ export function useMatrixCollaboration(roomId: string): {
     if (!client) return;
     const ydoc = ydocRef.current!;
 
-    setLoadState("loading");
-
     // Create a fresh provider on every effect invocation (handles Strict Mode
     // double-invoke: the old provider is destroyed by cleanup, this creates a
     // replacement with its own un-destroyed onYjsUpdate listener on the ydoc).

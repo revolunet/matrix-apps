@@ -2,6 +2,12 @@ import * as sdk from "matrix-js-sdk";
 import { ClientEvent } from "matrix-js-sdk";
 import type { MatrixClient } from "matrix-js-sdk";
 import { getHomeserverUrl } from "@/lib/constants";
+import {
+  SESSION_KEY,
+  RECOVERY_KEY,
+  LOGIN_PASSWORD_KEY,
+  clearMatrixStorage,
+} from "./storage";
 
 // Pre-warm: start WASM download immediately at module load so it's ready
 // (or nearly ready) by the time initRustCrypto() is called.
@@ -26,14 +32,14 @@ interface CreateClientOptions {
   deviceId: string;
 }
 
-// Decode the recovery key we previously stored in sessionStorage and return
+// Decode the recovery key we previously stored in localStorage and return
 // it in the format the SDK expects: [keyId, privateKey].
 // Returns null if the key isn't available — the SDK will then fall through to
 // createSecretStorageKey (if provided) or error if neither is available.
-function getSecretStorageKeyFromSession(
+function getSecretStorageKeyFromStorage(
   keys: Record<string, unknown>,
 ): [string, Uint8Array] | null {
-  const encoded = sessionStorage.getItem("matrix_recovery_key");
+  const encoded = localStorage.getItem(RECOVERY_KEY);
   if (!encoded) return null;
   try {
     const binary = atob(encoded);
@@ -47,6 +53,28 @@ function getSecretStorageKeyFromSession(
   } catch {
     return null;
   }
+}
+
+/**
+ * Returns true if the Rust crypto IndexedDB store already exists on disk.
+ * When false during a session restore it means the store was wiped while the
+ * localStorage session survived — uploading fresh OTKs would then collide
+ * with the old ones still registered on the server.
+ *
+ * Falls back to `true` on browsers that don't support `indexedDB.databases()`
+ * (Safari < 16.4) so we don't incorrectly force a re-login there.
+ */
+async function cryptoStoreExists(storeName: string): Promise<boolean> {
+  if (!("databases" in indexedDB)) return true;
+  const dbs = await (indexedDB as IDBFactory & { databases(): Promise<IDBDatabaseInfo[]> }).databases();
+  // The rust crypto SDK names its IndexedDB databases "<prefix>::matrix-sdk-crypto"
+  // and "<prefix>::matrix-sdk-crypto-meta" (see cryptoDatabasePrefix passed to
+  // initRustCrypto below) — not the bare prefix itself.
+  return dbs.some(
+    (db) =>
+      db.name === `${storeName}::matrix-sdk-crypto` ||
+      db.name === `${storeName}::matrix-sdk-crypto-meta`,
+  );
 }
 
 async function deleteIndexedDBStores(storeName: string): Promise<void> {
@@ -89,14 +117,29 @@ export function clearBootstrapGuard(userId: string, deviceId: string): void {
 // Runs after the client has started and reached PREPARED/SYNCING.
 // Called fire-and-forget — failures are non-fatal for the prototype.
 async function bootstrapCrypto(client: MatrixClient): Promise<void> {
+  const crypto = client.getCrypto();
+  if (!crypto) return;
+
+  // Runs on every session start, not just first bootstrap. Without a local
+  // copy of the backup decryption key, a device that never received a given
+  // Megolm session (e.g. a message from another user's device, or a session
+  // lost when this device's IndexedDB store was reset) can never decrypt
+  // that event — there is no other recovery path. Loading the key here is
+  // what makes the rust crypto engine auto-restore individual missing
+  // session keys from the server backup on decryption failure.
+  try {
+    await crypto.checkKeyBackupAndEnable();
+    await crypto.loadSessionBackupPrivateKeyFromSecretStorage();
+  } catch {
+    // No backup yet, or secret storage isn't set up — bootstrap below
+    // creates both for a brand-new account.
+  }
+
   const key = bootstrapKey(client.getUserId()!, client.getDeviceId()!);
   // Use localStorage (not sessionStorage) so the guard survives tab close.
   // Without this, bootstrap runs on every new session even when secret
   // storage and cross-signing are already fully configured.
   if (localStorage.getItem(key)) return;
-
-  const crypto = client.getCrypto();
-  if (!crypto) return;
 
   try {
     // Check whether secret storage is already configured on this account.
@@ -109,11 +152,20 @@ async function bootstrapCrypto(client: MatrixClient): Promise<void> {
           const { keyInfo, privateKey } =
             await crypto.createRecoveryKeyFromPassphrase();
           const encoded = btoa(String.fromCharCode(...privateKey));
-          sessionStorage.setItem("matrix_recovery_key", encoded);
+          localStorage.setItem(RECOVERY_KEY, encoded);
           return { keyInfo, privateKey };
         },
+        // Creates a fresh server-side key backup so Megolm session keys are
+        // recoverable if this device's local store is ever lost, and so
+        // other devices/sessions can decrypt this device's historical
+        // messages. Costs some /room_keys/keys/* traffic on startup — an
+        // acceptable trade-off for not silently losing document content.
         setupNewKeyBackup: true,
       });
+      // Backup now exists — start using it in this session immediately
+      // rather than waiting for the next reload.
+      await crypto.checkKeyBackupAndEnable().catch(() => {});
+      await crypto.loadSessionBackupPrivateKeyFromSecretStorage().catch(() => {});
     }
   } catch (err) {
     console.warn("[matrix] bootstrapSecretStorage failed (non-fatal):", err);
@@ -122,7 +174,7 @@ async function bootstrapCrypto(client: MatrixClient): Promise<void> {
   try {
     await crypto.bootstrapCrossSigning({
       authUploadDeviceSigningKeys: async (makeRequest) => {
-        const password = sessionStorage.getItem("matrix_login_password") ?? "";
+        const password = sessionStorage.getItem(LOGIN_PASSWORD_KEY) ?? "";
         try {
           await makeRequest({ type: "m.login.password", password });
         } catch {
@@ -137,14 +189,31 @@ async function bootstrapCrypto(client: MatrixClient): Promise<void> {
   localStorage.setItem(key, "1");
 }
 
-export async function createMatrixClient({
-  accessToken,
-  userId,
-  deviceId,
-}: CreateClientOptions): Promise<MatrixClient> {
+export async function createMatrixClient(
+  { accessToken, userId, deviceId }: CreateClientOptions,
+  { isSessionRestore = false }: { isSessionRestore?: boolean } = {},
+): Promise<MatrixClient> {
   if (_client) {
     _client.stopClient();
     _client = null;
+  }
+
+  const storeName = `${userId}:${deviceId}`;
+
+  // During a session restore, verify the crypto store still exists on disk.
+  // If it was wiped (e.g. browser cleared site data) while the localStorage
+  // session survived, `initRustCrypto` would silently create a fresh store and
+  // generate new OTKs starting from index 0 — colliding with the old OTKs
+  // already registered on the homeserver for this deviceId.
+  if (isSessionRestore && !(await cryptoStoreExists(storeName))) {
+    try {
+      const tempClient = sdk.createClient({ baseUrl: getHomeserverUrl(), accessToken, userId, deviceId });
+      await tempClient.logout(false);
+    } catch {
+      // Best-effort server logout — carry on even if it fails
+    }
+    clearMatrixStorage();
+    throw new Error("Crypto store was cleared — session reset, please log in again.");
   }
 
   const client = sdk.createClient({
@@ -158,21 +227,53 @@ export async function createMatrixClient({
     // callback supplied" when existing secret storage is already on the account.
     cryptoCallbacks: {
       getSecretStorageKey: async ({ keys }) =>
-        getSecretStorageKeyFromSession(keys),
+        getSecretStorageKeyFromStorage(keys),
     },
   });
 
   // Each device gets its own IndexedDB store keyed by userId:deviceId.
   // Without this, a second login (new device ID) conflicts with the store
   // written for the previous device ID → "account in the store doesn't match".
-  const storeName = `${userId}:${deviceId}`;
   try {
-    await client.initRustCrypto({ storeName });
+    await client.initRustCrypto({ cryptoDatabasePrefix: storeName });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     if (msg.includes("doesn't match the account in the constructor")) {
+      // The local crypto store belongs to a different session. Wiping it and
+      // re-initialising with the same deviceId would cause "one time key
+      // already exists" errors: the new store generates OTKs starting at
+      // index 0, but the server still has those key IDs from the old store.
+      //
+      // Fix: log the stale device out of the server (which purges its OTKs),
+      // wipe the local store, clear the session, and let the auth flow
+      // redirect to /login — the next login will obtain a fresh deviceId.
       await deleteIndexedDBStores(storeName);
-      await client.initRustCrypto({ storeName });
+
+      const rawSession = localStorage.getItem(SESSION_KEY);
+      if (rawSession) {
+        try {
+          const s = JSON.parse(rawSession) as {
+            accessToken: string;
+            userId: string;
+            deviceId: string;
+          };
+          // Unauthenticated-style client just to send the logout
+          const tempClient = sdk.createClient({
+            baseUrl: getHomeserverUrl(),
+            accessToken: s.accessToken,
+            userId: s.userId,
+            deviceId: s.deviceId,
+          });
+          await tempClient.logout(false);
+        } catch {
+          // Best-effort — proceed even if the logout request fails
+        }
+      }
+
+      clearMatrixStorage();
+      throw new Error(
+        "Crypto store mismatch — session cleared. Please log in again.",
+      );
     } else {
       throw err;
     }

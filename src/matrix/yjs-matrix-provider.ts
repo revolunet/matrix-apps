@@ -1,7 +1,7 @@
 import * as Y from "yjs";
 import { Awareness } from "y-protocols/awareness";
-import { RoomMemberEvent } from "matrix-js-sdk";
-import type { MatrixClient, MatrixEvent, RoomMember } from "matrix-js-sdk";
+import { ClientEvent, RoomMemberEvent } from "matrix-js-sdk";
+import type { MatrixClient, MatrixEvent, Room, RoomMember } from "matrix-js-sdk";
 
 export const DOC_YJS_UPDATE_EVENT = "org.demo-e2e-app.doc.yjs.update";
 export const DOC_YJS_SNAPSHOT_EVENT = "org.demo-e2e-app.doc.yjs.snapshot";
@@ -72,15 +72,50 @@ export class MatrixYjsProvider {
     try {
       await this.loadInternal();
     } finally {
-      // Always open the gate — if we bail early (room not found, new room not
-      // yet synced) there is nothing to replay, and user edits must still flow.
+      // Open the gate regardless of outcome so a locally-typed edit (or
+      // BlockNote's default-empty-paragraph init) after a failed load isn't
+      // stuck buffering forever — the UI keeps editing blocked on error anyway.
       this.loaded = true;
     }
   }
 
+  /**
+   * Waits for the room to appear in the client's local store. Right after
+   * accepting a share (or on a fresh login), the client may not have synced
+   * this particular room into its store yet even though it's a real,
+   * populated room — `getRoom` returning null here does NOT mean there is no
+   * history to load, so we must not treat it as such (see loadInternal).
+   */
+  private waitForRoom(timeoutMs = 15000): Promise<Room | null> {
+    const existing = this.client.getRoom(this.roomId);
+    if (existing) return Promise.resolve(existing);
+
+    return new Promise((resolve) => {
+      const cleanup = () => {
+        clearTimeout(timer);
+        this.client.off(ClientEvent.Room, onRoom);
+      };
+      const onRoom = (room: Room) => {
+        if (room.roomId !== this.roomId) return;
+        cleanup();
+        resolve(room);
+      };
+      const timer = setTimeout(() => {
+        cleanup();
+        resolve(null);
+      }, timeoutMs);
+      this.client.on(ClientEvent.Room, onRoom);
+    });
+  }
+
   private async loadInternal(): Promise<void> {
-    const room = this.client.getRoom(this.roomId);
-    if (!room) return;
+    const room = await this.waitForRoom();
+    if (!room) {
+      // Genuinely never showed up (bad roomId, revoked access, sync stuck) —
+      // surface this as a load failure rather than silently reporting the
+      // document as loaded/synced with content we never actually fetched.
+      throw new Error(`Room ${this.roomId} did not sync locally in time`);
+    }
 
     // Paginate backwards so we have the full event history — the initial sync
     // only loads the last N events, which would give an incomplete Yjs state

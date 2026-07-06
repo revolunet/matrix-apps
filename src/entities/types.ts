@@ -18,6 +18,7 @@ export interface EntityConfig<TSchema extends ZodTypeAny = ZodTypeAny> {
   type: string; // unique key: 'contact', 'company'
   label: string;
   pluralLabel: string;
+  icon: string; // emoji shown in sidebar
   urlSegment: string; // URL path segment: 'contacts', 'companies'
   schema: TSchema; // full schema (with system fields: id, timestamps, roomIds)
   formSchema: TSchema; // form schema (system fields omitted)

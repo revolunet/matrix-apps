@@ -6,6 +6,7 @@ import {
   loadSharedDocs,
   saveDocsIndex,
   createDocRoom,
+  setDocMeta,
   type DocIndexEntry,
 } from "@/matrix/docs-matrix";
 
@@ -141,6 +142,16 @@ export const useDocsStore = create<DocsState>((set, get) => ({
     const updated = get().docs.map((d) => (d.docId === docId ? { ...d, title } : d));
     set({ docs: updated });
     await saveDocsIndex(client, persistableDocs(updated));
+
+    // Account data is private to the owner — collaborators read the title
+    // from the room's own state event, which won't reflect this rename
+    // unless we push it there too.
+    const entry = updated.find((d) => d.docId === docId);
+    if (entry?.roomId) {
+      await setDocMeta(client, entry.roomId, docId, title, entry.parentDocId).catch(
+        (err) => console.warn("[docs] failed to sync title to room state:", err),
+      );
+    }
   },
 
   moveDoc: async (client, docId, newParentDocId, newOrder) => {
@@ -149,6 +160,15 @@ export const useDocsStore = create<DocsState>((set, get) => ({
     );
     set({ docs: updated });
     await saveDocsIndex(client, persistableDocs(updated));
+
+    // Same reasoning as renameDoc — collaborators derive hierarchy from the
+    // room's state event, not our private index.
+    const entry = updated.find((d) => d.docId === docId);
+    if (entry?.roomId) {
+      await setDocMeta(client, entry.roomId, docId, entry.title, newParentDocId).catch(
+        (err) => console.warn("[docs] failed to sync parent to room state:", err),
+      );
+    }
   },
 
   reorderDocs: async (client, reordered) => {

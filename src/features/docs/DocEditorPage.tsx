@@ -1,12 +1,15 @@
 import "@blocknote/mantine/style.css";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
 import { BlockNoteView } from "@blocknote/mantine";
 import { MantineProvider } from "@mantine/core";
 import { useDocsStore } from "@/stores/docs.store";
 import { useAuthStore } from "@/stores/auth.store";
-import { useMatrixCollaboration, type DocLoadState } from "./useMatrixCollaboration";
+import {
+  useMatrixCollaboration,
+  type DocLoadState,
+} from "./useMatrixCollaboration";
 import { DocCommentsSidebar } from "./DocCommentsSidebar";
 import { DocShareDialog } from "./DocShareDialog";
 
@@ -15,7 +18,7 @@ function DocLoadStatus({ state }: { state: DocLoadState }) {
     return (
       <span className="flex items-center gap-1.5 text-xs text-gray-400">
         <span className="w-1.5 h-1.5 rounded-full bg-gray-400 animate-pulse" />
-        Loading…
+        Syncing…
       </span>
     );
   }
@@ -23,36 +26,48 @@ function DocLoadStatus({ state }: { state: DocLoadState }) {
     return (
       <span className="flex items-center gap-1.5 text-xs text-red-500">
         <span className="w-1.5 h-1.5 rounded-full bg-red-500" />
-        Failed to load
+        Failed to sync
       </span>
     );
   }
   return (
     <span className="flex items-center gap-1.5 text-xs text-green-600">
       <span className="w-1.5 h-1.5 rounded-full bg-green-500" />
-      Loaded
+      Synced
     </span>
   );
 }
 
-function DocEditorInner({
-  docId,
-  roomId,
-}: {
-  docId: string;
-  roomId: string;
-}) {
+function DocEditorInner({ docId, roomId }: { docId: string; roomId: string }) {
   const client = useAuthStore((s) => s.client)!;
-  const doc = useDocsStore((s) =>
-    s.docs.find((d) => d.docId === docId) ?? s.sharedDocs.find((d) => d.docId === docId),
+  const doc = useDocsStore(
+    (s) =>
+      s.docs.find((d) => d.docId === docId) ??
+      s.sharedDocs.find((d) => d.docId === docId),
   );
-  const isShared = useDocsStore((s) => s.sharedDocs.some((d) => d.docId === docId));
+  const isShared = useDocsStore((s) =>
+    s.sharedDocs.some((d) => d.docId === docId),
+  );
   const renameDoc = useDocsStore((s) => s.renameDoc);
   const [showComments, setShowComments] = useState(false);
   const [titleValue, setTitleValue] = useState(doc?.title ?? "Untitled");
+  // Tracks whether the title input is mid-edit so the sync effect below
+  // doesn't clobber unsaved keystrokes when a remote rename arrives.
+  const titleFocusedRef = useRef(false);
 
   // Keyed on roomId — fresh Y.Doc + provider per room
   const { editor, loadState } = useMatrixCollaboration(roomId);
+
+  // doc.title only reflects a remote rename (e.g. the owner renaming from
+  // another session, or a collaborator's live-refreshed shared-doc state) —
+  // titleValue is local state that otherwise only ever gets set once, at
+  // mount, and would silently go stale.
+  const docTitle = doc?.title;
+  useEffect(() => {
+    if (!titleFocusedRef.current && docTitle !== undefined) {
+      setTitleValue(docTitle);
+    }
+  }, [docTitle]);
 
   if (!doc) {
     return (
@@ -63,6 +78,7 @@ function DocEditorInner({
   }
 
   const handleTitleBlur = () => {
+    titleFocusedRef.current = false;
     const trimmed = titleValue.trim();
     if (trimmed && trimmed !== doc.title) {
       renameDoc(client, doc.docId, trimmed);
@@ -81,6 +97,7 @@ function DocEditorInner({
               value={titleValue}
               readOnly={isShared}
               onChange={(e) => setTitleValue(e.target.value)}
+              onFocus={() => (titleFocusedRef.current = true)}
               onBlur={handleTitleBlur}
               onKeyDown={(e) => {
                 if (e.key === "Enter") e.currentTarget.blur();
@@ -124,7 +141,11 @@ function DocEditorInner({
                 {doc.title}
               </h1>
               {loadState === "loaded" ? (
-                <BlockNoteView editor={editor} theme="light" className="min-h-64" />
+                <BlockNoteView
+                  editor={editor}
+                  theme="light"
+                  className="min-h-64"
+                />
               ) : loadState === "error" ? (
                 // Editing stays blocked here rather than falling back to an
                 // empty editor — typing on top of a doc that may only be
@@ -195,8 +216,10 @@ function CreatingState({ title }: { title: string }) {
 
 export function DocEditorPage() {
   const { docId } = useParams<{ docId: string }>();
-  const doc = useDocsStore((s) =>
-    s.docs.find((d) => d.docId === docId) ?? s.sharedDocs.find((d) => d.docId === docId),
+  const doc = useDocsStore(
+    (s) =>
+      s.docs.find((d) => d.docId === docId) ??
+      s.sharedDocs.find((d) => d.docId === docId),
   );
 
   if (!docId) return null;

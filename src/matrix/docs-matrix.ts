@@ -70,6 +70,29 @@ export async function createDocRoom(
   return resp.room_id;
 }
 
+/**
+ * Mirrors a title/parent change into the room's own DOC_META_STATE_TYPE
+ * state event. Collaborators derive shared-doc titles and hierarchy from
+ * this room state (see loadSharedDocs) — they can't read the owner's
+ * private account-data index — so renames and moves are invisible to them
+ * unless also written here.
+ */
+export async function setDocMeta(
+  client: MatrixClient,
+  roomId: string,
+  docId: string,
+  title: string,
+  parentDocId: string | null,
+): Promise<void> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  await (client as any).sendStateEvent(
+    roomId,
+    DOC_META_STATE_TYPE,
+    { title, parentDocId, docId },
+    "",
+  );
+}
+
 export async function deleteDoc(
   client: MatrixClient,
   docId: string,

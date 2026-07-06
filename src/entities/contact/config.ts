@@ -12,6 +12,7 @@ registerEntity({
   type: "contact",
   label: "Contact",
   pluralLabel: "Contacts",
+  icon: "👤",
   urlSegment: "contacts",
   schema: ContactSchema,
   formSchema: ContactFormSchema,

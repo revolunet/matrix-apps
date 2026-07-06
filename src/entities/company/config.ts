@@ -11,6 +11,7 @@ registerEntity({
   type: "company",
   label: "Company",
   pluralLabel: "Companies",
+  icon: "🏢",
   urlSegment: "companies",
   schema: CompanySchema,
   formSchema: CompanyFormSchema,

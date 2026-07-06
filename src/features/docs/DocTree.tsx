@@ -131,7 +131,7 @@ export function DocTree() {
 
   if (loading) {
     return (
-      <div className="p-4 text-xs text-gray-400">Loading documents...</div>
+      <div className="p-4 text-xs text-gray-400">Syncing documents...</div>
     );
   }
 

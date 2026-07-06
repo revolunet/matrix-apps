@@ -1,14 +1,17 @@
 import * as sdk from "matrix-js-sdk";
 import { getHomeserverUrl } from "@/lib/constants";
 import { createMatrixClient, startMatrixClient, clearBootstrapGuard } from "./client";
+import { SESSION_KEY, LOGIN_PASSWORD_KEY, LAST_USERNAME_KEY, clearMatrixStorage } from "./storage";
 import type { MatrixClient } from "matrix-js-sdk";
-
-const SESSION_KEY = "matrix_session";
 
 interface StoredSession {
   accessToken: string;
   userId: string;
   deviceId: string;
+}
+
+export function getLastUsername(): string {
+  return localStorage.getItem(LAST_USERNAME_KEY) ?? "";
 }
 
 export async function login(
@@ -20,14 +23,15 @@ export async function login(
   const resp = await tempClient.loginWithPassword(username, password);
 
   // Store password temporarily for cross-signing UIA bootstrap
-  sessionStorage.setItem("matrix_login_password", password);
+  sessionStorage.setItem(LOGIN_PASSWORD_KEY, password);
+  localStorage.setItem(LAST_USERNAME_KEY, username);
 
   const session: StoredSession = {
     accessToken: resp.access_token,
     userId: resp.user_id,
     deviceId: resp.device_id,
   };
-  sessionStorage.setItem(SESSION_KEY, JSON.stringify(session));
+  localStorage.setItem(SESSION_KEY, JSON.stringify(session));
 
   return session;
 }
@@ -82,13 +86,14 @@ export async function register(
     userId: resp.user_id,
     deviceId: resp.device_id,
   };
-  sessionStorage.setItem("matrix_login_password", password);
-  sessionStorage.setItem(SESSION_KEY, JSON.stringify(session));
+  sessionStorage.setItem(LOGIN_PASSWORD_KEY, password);
+  localStorage.setItem(LAST_USERNAME_KEY, username);
+  localStorage.setItem(SESSION_KEY, JSON.stringify(session));
   return session;
 }
 
 export function loadSession(): StoredSession | null {
-  const raw = sessionStorage.getItem(SESSION_KEY);
+  const raw = localStorage.getItem(SESSION_KEY);
   if (!raw) return null;
   try {
     return JSON.parse(raw) as StoredSession;
@@ -107,14 +112,14 @@ export async function logout(client: MatrixClient): Promise<void> {
   }
   client.stopClient();
   clearBootstrapGuard(userId, deviceId);
-  sessionStorage.clear();
+  clearMatrixStorage();
 }
 
 export async function initializeSession(): Promise<MatrixClient | null> {
   const session = loadSession();
   if (!session) return null;
 
-  const client = await createMatrixClient(session);
+  const client = await createMatrixClient(session, { isSessionRestore: true });
   await startMatrixClient(client);
   return client;
 }
