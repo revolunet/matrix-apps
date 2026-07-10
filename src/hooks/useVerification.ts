@@ -74,11 +74,12 @@ export function useVerification() {
       CRYPTO_EVENT_VERIFICATION_REQUEST as Parameters<typeof client.on>[0],
       onRequest,
     );
-    return () =>
+    return () => {
       client.off(
         CRYPTO_EVENT_VERIFICATION_REQUEST as Parameters<typeof client.on>[0],
         onRequest,
       );
+    };
   }, [client]);
 
   const accept = async () => {

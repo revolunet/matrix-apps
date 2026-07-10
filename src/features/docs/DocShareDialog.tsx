@@ -45,7 +45,9 @@ export function DocShareDialog({ docId, roomId }: Props) {
       if (member.roomId === roomId) refreshMembers();
     };
     client.on(RoomMemberEvent.Membership, onMembership);
-    return () => client.off(RoomMemberEvent.Membership, onMembership);
+    return () => {
+      client.off(RoomMemberEvent.Membership, onMembership);
+    };
   }, [client, roomId, userId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const open = () => {

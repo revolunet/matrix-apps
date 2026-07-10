@@ -69,8 +69,6 @@ export async function createDocRoom(
   docId: string,
   title: string,
   parentDocId: string | null,
-  order: number,
-  createdAt: string,
 ): Promise<string> {
   const roomName = `${APP_PREFIX}/docs/${docId}`;
   const resp = await createRoomWithRetry(client, {

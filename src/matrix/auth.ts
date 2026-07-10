@@ -52,9 +52,12 @@ export async function register(
   };
 
   let sessionId: string | null = null;
+  // matrix-js-sdk's register() types `auth` as required, but the first UIA
+  // probe call is meant to be sent without it to receive the 401 flow list.
+  const noAuth = null as unknown as { type: string };
 
   try {
-    await tempClient.register(username, password, null, null);
+    await tempClient.register(username, password, null, noAuth);
   } catch (err) {
     const e = err as MatrixRegisterError;
     if (e.httpStatus === 401 && e.data?.session) {
@@ -70,7 +73,7 @@ export async function register(
       username,
       password,
       sessionId,
-      sessionId ? { type: "m.login.dummy", session: sessionId } : null,
+      sessionId ? { type: "m.login.dummy", session: sessionId } : noAuth,
     );
   } catch (err) {
     const e = err as MatrixRegisterError;

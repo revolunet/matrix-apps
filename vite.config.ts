@@ -6,7 +6,8 @@ import wasm from "vite-plugin-wasm";
 
 // https://vite.dev/config/
 // Note: vite-plugin-top-level-await is not needed with Vite 8 + target esnext
-export default defineConfig({
+export default defineConfig(({ command }) => ({
+  base: command === "build" ? "/matrix-apps/" : "/",
   plugins: [react(), tailwindcss(), wasm()],
   resolve: {
     alias: { "@": path.resolve(__dirname, "./src") },
@@ -16,4 +17,4 @@ export default defineConfig({
     include: ["matrix-js-sdk"],
   },
   build: { target: "esnext" },
-});
+}));

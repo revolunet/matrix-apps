@@ -51,7 +51,7 @@ function SessionLoader() {
 
 function App() {
   return (
-    <BrowserRouter>
+    <BrowserRouter basename={import.meta.env.BASE_URL}>
       <SessionLoader />
       <Routes>
         <Route path="/" element={<HomePage />} />

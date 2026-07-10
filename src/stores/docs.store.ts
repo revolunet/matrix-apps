@@ -117,7 +117,7 @@ export const useDocsStore = create<DocsState>((set, get) => ({
 
     // Create the Matrix room in the background, then persist using the store's
     // current state (not stale account-data) to avoid overwriting concurrent renames.
-    void createDocRoom(client, docId, title, parentDocId ?? null, order, createdAt)
+    void createDocRoom(client, docId, title, parentDocId ?? null)
       .then(async (roomId) => {
         set((s) => {
           const updated = s.docs.map((d) => (d.docId === docId ? { ...d, roomId } : d));

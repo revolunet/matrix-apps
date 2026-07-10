@@ -38,12 +38,12 @@ interface CreateClientOptions {
 // createSecretStorageKey (if provided) or error if neither is available.
 function getSecretStorageKeyFromStorage(
   keys: Record<string, unknown>,
-): [string, Uint8Array] | null {
+): [string, Uint8Array<ArrayBuffer>] | null {
   const encoded = localStorage.getItem(RECOVERY_KEY);
   if (!encoded) return null;
   try {
     const binary = atob(encoded);
-    const privateKey = new Uint8Array(binary.length);
+    const privateKey = new Uint8Array(new ArrayBuffer(binary.length));
     for (let i = 0; i < binary.length; i++) {
       privateKey[i] = binary.charCodeAt(i);
     }

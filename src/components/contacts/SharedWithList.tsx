@@ -37,7 +37,9 @@ export function SharedWithList({ dataRoomId, commentsRoomId }: Props) {
       if (member.roomId === dataRoomId) refresh();
     };
     client.on(RoomMemberEvent.Membership, onMembership);
-    return () => client.off(RoomMemberEvent.Membership, onMembership);
+    return () => {
+      client.off(RoomMemberEvent.Membership, onMembership);
+    };
   }, [client, dataRoomId, userId]);
 
   const handleRemove = async (targetUserId: string) => {
