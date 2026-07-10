@@ -13,9 +13,11 @@ import {
   type DocLoadState,
 } from "./useMatrixCollaboration";
 import { getDocsSlashMenuItems } from "./blocknote-schema";
-import { DocCommentsSidebar } from "./DocCommentsSidebar";
 import { DocShareDialog } from "./DocShareDialog";
-import { useDocComments } from "./useDocComments";
+import { sendDocComment, useDocComments } from "./useDocComments";
+import { CommentsSidebar } from "@/components/comments/CommentsSidebar";
+import { CommentsToggleButton } from "@/components/comments/CommentsToggleButton";
+import { useCommentsPanel } from "@/components/comments/useCommentsPanel";
 
 function DocLoadStatus({
   loadState,
@@ -86,7 +88,7 @@ function DocEditorInner({ docId, roomId }: { docId: string; roomId: string }) {
     s.sharedDocs.some((d) => d.docId === docId),
   );
   const renameDoc = useDocsStore((s) => s.renameDoc);
-  const [showComments, setShowComments] = useState(false);
+  const userId = useAuthStore((s) => s.userId);
   const [titleValue, setTitleValue] = useState(doc?.title ?? "Untitled");
   // Tracks whether the title input is mid-edit so the sync effect below
   // doesn't clobber unsaved keystrokes when a remote rename arrives.
@@ -95,16 +97,9 @@ function DocEditorInner({ docId, roomId }: { docId: string; roomId: string }) {
   // Subscribed regardless of whether the sidebar is open, so the header
   // button can flag incoming comments even while it's closed.
   const comments = useDocComments(client, roomId);
-  const [seenCount, setSeenCount] = useState(comments.length);
-  const hasUnseenComments = !showComments && comments.length > seenCount;
-
-  const toggleComments = () => {
-    setShowComments((v) => {
-      const next = !v;
-      if (next) setSeenCount(comments.length);
-      return next;
-    });
-  };
+  const { open: showComments, hasUnseen: hasUnseenComments, toggle: toggleComments, close: closeComments } =
+    useCommentsPanel(comments.length);
+  const handlePostComment = (body: string) => sendDocComment(client, roomId, docId, body);
 
   // Keyed on roomId — fresh Y.Doc + provider per room
   const { editor, loadState, isSyncing, isReceiving } = useMatrixCollaboration(roomId);
@@ -159,22 +154,7 @@ function DocEditorInner({ docId, roomId }: { docId: string; roomId: string }) {
           <div className="flex items-center gap-2 flex-none">
             <DocLoadStatus loadState={loadState} isSyncing={isSyncing} isReceiving={isReceiving} />
             <DocShareDialog docId={docId} roomId={roomId} />
-            <button
-              onClick={toggleComments}
-              className={`relative text-sm px-3 py-1.5 rounded-lg border transition-colors ${
-                showComments
-                  ? "border-blue-300 bg-blue-50 text-blue-700"
-                  : "border-gray-200 text-gray-600 hover:border-gray-400"
-              }`}
-            >
-              💬 Comments
-              {hasUnseenComments && (
-                <span className="absolute -top-1 -right-1 flex h-2.5 w-2.5">
-                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75" />
-                  <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-blue-500" />
-                </span>
-              )}
-            </button>
+            <CommentsToggleButton open={showComments} hasUnseen={hasUnseenComments} onClick={toggleComments} />
           </div>
         </div>
 
@@ -244,11 +224,12 @@ function DocEditorInner({ docId, roomId }: { docId: string; roomId: string }) {
       </div>
 
       {/* Comments sidebar */}
-      {showComments && doc && (
-        <DocCommentsSidebar
-          doc={doc}
+      {showComments && (
+        <CommentsSidebar
           comments={comments}
-          onClose={() => setShowComments(false)}
+          onSubmit={handlePostComment}
+          onClose={closeComments}
+          currentUserId={userId}
         />
       )}
     </div>

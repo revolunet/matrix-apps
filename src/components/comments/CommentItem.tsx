@@ -1,48 +1,44 @@
 import ReactMarkdown from "react-markdown";
-import type { Comment } from "@/schemas/comment.schema";
+import { commentMarkdownComponents } from "./commentMarkdown";
 
-interface Props {
-  comment: Comment;
+export interface CommentLike {
+  id: string;
+  authorId: string;
+  body: string;
+  createdAt: string;
 }
 
-export function CommentItem({ comment }: Props) {
+interface Props {
+  comment: CommentLike;
+  currentUserId?: string | null;
+}
+
+export function CommentItem({ comment, currentUserId }: Props) {
+  const authorLabel =
+    comment.authorId === currentUserId
+      ? "You"
+      : comment.authorId.split(":")[0].replace("@", "");
+
   return (
-    <li className="py-2 border-b border-gray-100 last:border-0">
-      <div className="flex items-baseline gap-2 mb-1">
-        <span className="text-xs font-medium text-gray-800 font-mono">
-          {comment.authorId}
+    <div className="flex flex-col gap-1">
+      <div className="flex items-baseline gap-2">
+        <span className="text-xs font-medium text-gray-700 truncate">
+          {authorLabel}
         </span>
         <span className="text-xs text-gray-400">
-          {new Date(comment.createdAt).toLocaleString()}
+          {new Date(comment.createdAt).toLocaleString(undefined, {
+            month: "short",
+            day: "numeric",
+            hour: "2-digit",
+            minute: "2-digit",
+          })}
         </span>
       </div>
       <div className="text-sm text-gray-700">
-        <ReactMarkdown
-          components={{
-            p: ({ children }) => <p className="mb-1 last:mb-0">{children}</p>,
-            a: ({ href, children }) => (
-              <a href={href} className="text-blue-600 underline" target="_blank" rel="noopener noreferrer">
-                {children}
-              </a>
-            ),
-            code: ({ children }) => (
-              <code className="bg-gray-100 px-1 rounded text-xs font-mono">{children}</code>
-            ),
-            pre: ({ children }) => (
-              <pre className="bg-gray-100 p-2 rounded text-xs font-mono overflow-x-auto my-1">{children}</pre>
-            ),
-            strong: ({ children }) => <strong className="font-semibold">{children}</strong>,
-            em: ({ children }) => <em className="italic">{children}</em>,
-            ul: ({ children }) => <ul className="list-disc list-inside my-1 space-y-0.5">{children}</ul>,
-            ol: ({ children }) => <ol className="list-decimal list-inside my-1 space-y-0.5">{children}</ol>,
-            blockquote: ({ children }) => (
-              <blockquote className="border-l-2 border-gray-300 pl-3 text-gray-500 my-1">{children}</blockquote>
-            ),
-          }}
-        >
+        <ReactMarkdown components={commentMarkdownComponents}>
           {comment.body}
         </ReactMarkdown>
       </div>
-    </li>
+    </div>
   );
 }

@@ -2,9 +2,12 @@ import { useParams } from "react-router-dom";
 import { getEntityConfigBySegment } from "@/entities/registry";
 import type { EntityConfig } from "@/entities/types";
 import { useEntityStore } from "@/stores/entity.store";
+import { useAuthStore } from "@/stores/auth.store";
 import { useMatrixClient } from "@/hooks/useMatrixClient";
 import { EntityForm } from "@/components/entity/EntityForm";
-import { CommentsFeed } from "@/components/comments/CommentsFeed";
+import { CommentsSidebar } from "@/components/comments/CommentsSidebar";
+import { CommentsToggleButton } from "@/components/comments/CommentsToggleButton";
+import { useCommentsPanel } from "@/components/comments/useCommentsPanel";
 import { FileDropZone } from "@/components/contacts/FileDropZone";
 import { ShareDialog } from "@/components/contacts/ShareDialog";
 import { SharedWithList } from "@/components/contacts/SharedWithList";
@@ -16,6 +19,7 @@ export function EntityDetailPage() {
     entityId: string;
   }>();
   const client = useMatrixClient();
+  const userId = useAuthStore((s) => s.userId);
   const upsertEntity = useEntityStore((s) => s.upsertEntity);
 
   // Resolve config safely — all hooks must be called before any early return.
@@ -36,6 +40,12 @@ export function EntityDetailPage() {
   );
   const rawComments = useEntityStore((s) => s.comments[type]?.[id]);
   const rawIndexEntries = useEntityStore((s) => s.indices[type]);
+  const {
+    open: showComments,
+    hasUnseen: hasUnseenComments,
+    toggle: toggleComments,
+    close: closeComments,
+  } = useCommentsPanel(rawComments?.length ?? 0);
 
   // Early returns after all hooks
   if (!entityType || !entityId) return null;
@@ -91,77 +101,92 @@ export function EntityDetailPage() {
     : undefined;
 
   return (
-    <div className="space-y-8">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-lg font-semibold text-gray-900">{displayName}</h1>
-          <dl className="mt-1 space-y-0.5">
-            {createdAt && (
-              <div className="flex gap-2 text-xs text-gray-400">
-                <dt>Created</dt>
-                <dd>{new Date(createdAt).toLocaleString()}</dd>
-              </div>
-            )}
-            {createdBy && (
-              <div className="flex gap-2 text-xs text-gray-400">
-                <dt>By</dt>
-                <dd className="font-mono">{createdBy}</dd>
-              </div>
-            )}
-          </dl>
+    <div className="flex h-full min-w-0 overflow-hidden">
+      {/* Main content column */}
+      <div className="flex-1 min-w-0 overflow-y-auto p-6">
+        <div className="space-y-8">
+          <div className="flex items-center justify-between">
+            <div>
+              <h1 className="text-lg font-semibold text-gray-900">{displayName}</h1>
+              <dl className="mt-1 space-y-0.5">
+                {createdAt && (
+                  <div className="flex gap-2 text-xs text-gray-400">
+                    <dt>Created</dt>
+                    <dd>{new Date(createdAt).toLocaleString()}</dd>
+                  </div>
+                )}
+                {createdBy && (
+                  <div className="flex gap-2 text-xs text-gray-400">
+                    <dt>By</dt>
+                    <dd className="font-mono">{createdBy}</dd>
+                  </div>
+                )}
+              </dl>
+            </div>
+            <div className="flex items-center gap-2 flex-none">
+              <ShareDialog
+                entityId={entityId}
+                dataRoomId={dataRoomId}
+                commentsRoomId={commentsRoomId}
+              />
+              <CommentsToggleButton
+                open={showComments}
+                hasUnseen={hasUnseenComments}
+                onClick={toggleComments}
+              />
+            </div>
+          </div>
+
+          {entity ? (
+            <section>
+              <h2 className="text-sm font-semibold text-gray-700 mb-3">
+                Edit {config.label}
+              </h2>
+              <EntityForm
+                key={entityId}
+                config={config}
+                defaultValues={defaultValues}
+                onSubmit={handleUpdate}
+                submitLabel={`Update ${config.label}`}
+              />
+            </section>
+          ) : (
+            <p className="text-sm text-gray-500">
+              {config.label} data is still syncing...
+            </p>
+          )}
+
+          {dataRoomId && (
+            <SharedWithList
+              dataRoomId={dataRoomId}
+              commentsRoomId={commentsRoomId!}
+            />
+          )}
+
+          {dataRoomId && (
+            <section>
+              <h2 className="text-sm font-semibold text-gray-700 mb-3">
+                Documents
+              </h2>
+              <FileDropZone
+                entityId={entityId}
+                entityType={config.type}
+                dataRoomId={dataRoomId}
+              />
+            </section>
+          )}
         </div>
-        <ShareDialog
-          entityId={entityId}
-          dataRoomId={dataRoomId}
-          commentsRoomId={commentsRoomId}
-        />
       </div>
 
-      {entity ? (
-        <section>
-          <h2 className="text-sm font-semibold text-gray-700 mb-3">
-            Edit {config.label}
-          </h2>
-          <EntityForm
-            key={entityId}
-            config={config}
-            defaultValues={defaultValues}
-            onSubmit={handleUpdate}
-            submitLabel={`Update ${config.label}`}
-          />
-        </section>
-      ) : (
-        <p className="text-sm text-gray-500">
-          {config.label} data is still syncing...
-        </p>
-      )}
-
-      {dataRoomId && (
-        <SharedWithList
-          dataRoomId={dataRoomId}
-          commentsRoomId={commentsRoomId!}
-        />
-      )}
-
-      {dataRoomId && (
-        <section>
-          <h2 className="text-sm font-semibold text-gray-700 mb-3">
-            Documents
-          </h2>
-          <FileDropZone
-            entityId={entityId}
-            entityType={config.type}
-            dataRoomId={dataRoomId}
-          />
-        </section>
-      )}
-
-      <section>
-        <CommentsFeed
+      {/* Comments sidebar */}
+      {showComments && (
+        <CommentsSidebar
           comments={entityComments}
-          onPostComment={handlePostComment}
+          onSubmit={handlePostComment}
+          onClose={closeComments}
+          currentUserId={userId}
         />
-      </section>
+      )}
     </div>
   );
 }

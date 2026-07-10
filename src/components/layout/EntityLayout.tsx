@@ -44,8 +44,10 @@ export function EntityLayout() {
         </div>
       </div>
 
-      {/* Right panel: detail or form */}
-      <div className="flex-1 overflow-y-auto p-6">
+      {/* Right panel: detail or form — pages own their own scrolling/padding
+          so a detail page can lay out a full-height comments sidebar beside
+          its scrollable content, the same way Docs' editor does. */}
+      <div className="flex-1 min-w-0 flex flex-col overflow-hidden">
         <Outlet />
       </div>
     </div>

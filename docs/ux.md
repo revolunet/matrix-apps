@@ -192,6 +192,22 @@ Step badge color: yellow (pending), blue (sas), green (done), red (cancelled).
 
 ---
 
+## Comments
+
+**Files:** `src/components/comments/CommentsSidebar.tsx`, `CommentItem.tsx`, `CommentComposer.tsx`, `CommentsToggleButton.tsx`, `useCommentsPanel.ts`
+
+The CRM entity detail page and the Docs editor share one comments UI, added when the two apps' previously-separate comment implementations (CRM's bottom-of-page `CommentsFeed` and Docs' `DocCommentsSidebar`) were unified:
+
+- **Right-column panel**, not inline — `CommentsSidebar` is a fixed `w-72` column with its own border and scroll region, toggled open/closed rather than always rendered. Both `EntityDetailPage` and `DocEditorPage` lay out their content as a `flex h-full` row (scrollable main content + conditional sidebar) to make room for it; `EntityLayout`'s right panel had to stop owning scroll/padding itself (delegated to each page) so a detail page could do this.
+- **Toggle button with unseen badge** — `CommentsToggleButton` renders a "💬 Comments" header button; `useCommentsPanel(commentCount)` tracks a `seenCount` high-water mark and reports `hasUnseen` whenever new comments arrived while the panel was closed, driving an animated ping badge on the button.
+- **Enter-only submit** — `CommentComposer`'s textarea sends on `Enter` and inserts a newline on `Shift+Enter`. (The CRM's old composer required ⌘/Ctrl+Enter; this was changed to match Docs during unification.)
+- **Author rendering** — `CommentItem` shows "You" for the current user's own comments (by matching `currentUserId`) and the Matrix ID's localpart otherwise, for both apps.
+- **Markdown rendering** — both apps render comment bodies through the shared `commentMarkdownComponents` (bold/italic/code/lists/blockquotes/links — no images or tables).
+
+What's *not* shared is where comments actually live: the CRM keeps its dedicated per-entity comments room (see ADR-2 in [architecture.md](architecture.md)) and posts through `sendComment` (`entity-events.ts`); Docs has no separate comments room and posts through `sendDocComment` (`useDocComments.ts`) into the doc's own room, tagged `doc_comment: true`. Each page reads its own comment list (`entity.store.ts`'s `comments` slice for the CRM, the reactive `useDocComments` hook for Docs) and passes it into the same `CommentsSidebar` component — see "Shared comments UI" in [architecture.md](architecture.md#docs-architecture) for the data-flow side of this.
+
+---
+
 ## Docs
 
 ### Layout
@@ -221,15 +237,9 @@ A BlockNote (`@blocknote/mantine`) rich-text editor wired to Yjs via `useMatrixC
 
 - **Title** is an inline `<input>` in the header plus a duplicated large `contentEditable` `<h1>` in the document body — both write through `renameDoc` on blur. Both are `readOnly`/non-editable when the current user only has the doc via "Shared with me" (`isShared`).
 - **Load/sync status indicator** (`DocLoadStatus`) shows one of four states, checked in this precedence: `loading` (initial history replay) → `error` (retry button, reloads the page) → `isReceiving` ("Updating…", a remote edit is mid-decryption) → `isSyncing` ("Saving…", local edits not yet confirmed persisted) → `"Synced"`.
-- **Comments toggle** — a button with an animated ping badge when comments arrive while the sidebar is closed (`hasUnseenComments`, tracked via a `seenCount` high-water mark).
+- **Comments** — the shared `CommentsToggleButton`/`CommentsSidebar` described in [Comments](#comments) above; `useDocComments` (`src/features/docs/useDocComments.ts`) re-derives the full comment list from the doc room's live timeline on every `RoomEvent.Timeline` and `MatrixEventEvent.Decrypted` event (no incremental append), and `sendDocComment` (same file) posts new ones.
 - The editor itself is only mounted once `loadState === "loaded"` — a skeleton (four animated bars) renders while loading, and an error state blocks editing entirely rather than risk persisting edits on top of a partially-restored document.
 - Slash-menu (`/`) items come from `getDocsSlashMenuItems` (`blocknote-schema.tsx`), which adds custom blocks (callouts, multi-column layout, page break) alongside BlockNote's defaults.
-
-### Comments Sidebar
-
-**File:** `src/features/docs/DocCommentsSidebar.tsx`, `src/features/docs/useDocComments.ts`
-
-Unlike CRM comments (plain text in a dedicated comments room), doc comments are `m.room.message` events in the *same* room as the document content, tagged `doc_comment: true`. `useDocComments` re-derives the full comment list from the room's live timeline on every `RoomEvent.Timeline` and `MatrixEventEvent.Decrypted` event (no incremental append) and renders bodies through `react-markdown` with a small custom component set (bold/italic/code/lists/blockquotes/links — no images or tables).
 
 ### Share Dialog (Docs)
 

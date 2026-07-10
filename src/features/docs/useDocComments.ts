@@ -36,6 +36,22 @@ function extractComments(client: MatrixClient, roomId: string): DocComment[] {
   return comments;
 }
 
+/** Sends a comment into a doc's own room (docs have no separate comments room — see architecture.md). */
+export async function sendDocComment(
+  client: MatrixClient,
+  roomId: string,
+  docId: string,
+  body: string,
+): Promise<void> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  await (client as any).sendEvent(roomId, "m.room.message", {
+    msgtype: "m.text",
+    body,
+    doc_comment: true,
+    doc_id: docId,
+  });
+}
+
 /**
  * Reactive doc-comment list for a room. `extractComments` alone only reads a
  * snapshot of the live timeline — without subscribing to timeline/decryption

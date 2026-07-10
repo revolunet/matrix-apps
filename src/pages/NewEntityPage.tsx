@@ -71,7 +71,7 @@ export function NewEntityPage() {
   };
 
   return (
-    <div>
+    <div className="h-full overflow-y-auto p-6">
       <h1 className="text-lg font-semibold text-gray-900 mb-6">
         New {config.label}
       </h1>

@@ -53,12 +53,19 @@ A React 19 + TypeScript SPA prototype that uses the Matrix protocol as a fully E
 | Doc editor page (BlockNote + status indicator) | `src/features/docs/DocEditorPage.tsx` |
 | BlockNote schema (custom blocks, slash menu) | `src/features/docs/blocknote-schema.tsx` |
 | Yjs↔BlockNote wiring, file upload/decrypt | `src/features/docs/useMatrixCollaboration.ts` |
-| Doc comments hook + sidebar | `src/features/docs/useDocComments.ts`, `src/features/docs/DocCommentsSidebar.tsx` |
+| Doc comments: reactive read hook + send helper | `src/features/docs/useDocComments.ts` |
 | Share dialog (with sub-doc fan-out) | `src/features/docs/DocShareDialog.tsx` |
 | Doc room lifecycle, hierarchy index, retry-on-rate-limit | `src/matrix/docs-matrix.ts` |
 | Yjs CRDT ↔ Matrix event bridge (chunking, snapshots) | `src/matrix/yjs-matrix-provider.ts` |
 | Shared attachment encryption (CRM + Docs) | `src/matrix/attachment-crypto.ts` |
 | Docs Zustand store (tree building, CRUD) | `src/stores/docs.store.ts` |
+
+### Shared (CRM + Docs)
+
+| Concern | File |
+|---|---|
+| Comments sidebar shell, item renderer, composer, toggle button, open/unseen-state hook | `src/components/comments/CommentsSidebar.tsx`, `CommentItem.tsx`, `CommentComposer.tsx`, `CommentsToggleButton.tsx`, `useCommentsPanel.ts` |
+| Shared comment-body markdown rendering | `src/components/comments/commentMarkdown.tsx` |
 
 ---
 

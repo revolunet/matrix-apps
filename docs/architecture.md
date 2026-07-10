@@ -213,12 +213,14 @@ Docs is the second app built on top of the same login/crypto layer as the CRM, b
 **Decision:** Each document is a single encrypted Matrix room (`createDocRoom`, `src/matrix/docs-matrix.ts`), created with `m.room.encryption` and a `DOC_META_STATE_TYPE` state event carrying `{ title, parentDocId, docId }`. That one room carries three kinds of content:
 
 - Yjs CRDT updates/snapshots (`DOC_YJS_UPDATE_EVENT` / `DOC_YJS_SNAPSHOT_EVENT`) — the document body.
-- Comments (`m.room.message` with `content.doc_comment: true` and `content.doc_id`) — sent directly by `DocCommentsSidebar`, no dedicated comments room.
+- Comments (`m.room.message` with `content.doc_comment: true` and `content.doc_id`) — sent via `sendDocComment` (`useDocComments.ts`), no dedicated comments room.
 - The `DOC_META_STATE_TYPE` state event — title/parent, kept in sync by `setDocMeta` whenever the owner renames or moves the doc.
 
 **Why one room, unlike the CRM's data+comments split (ADR-2)?** The CRM splits rooms so an entity's comments can be shared independently of its data. Docs doesn't offer that distinction — sharing a document always shares its discussion — so a single room avoids double room-creation latency and rate-limit exposure for every new doc (see `createRoomWithRetry` below).
 
 **Trade-off:** Comments cannot be shared or restricted separately from content, and both share the same Megolm session/timeline growth profile.
+
+**Shared comments UI:** Despite the different room models, both apps render comments through the same `src/components/comments/` component set (`CommentsSidebar`, `CommentItem`, `CommentComposer`, `CommentsToggleButton`, `useCommentsPanel`) — a right-column panel toggled from a header button, Enter-to-send (Shift+Enter for a newline), with an unseen-comment badge. Each app supplies its own `comments: { id, authorId, body, createdAt }[]` and an `onSubmit` callback that writes to wherever that app stores comments (`sendComment` into the CRM's dedicated comments room, `sendDocComment` into the doc's own room) — the components themselves are agnostic to the underlying room layout. See [ux.md](ux.md#comments) for the UI details.
 
 ### Hierarchy: private index + mirrored room state
 
