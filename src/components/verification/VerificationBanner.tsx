@@ -1,8 +1,15 @@
-import { useVerification } from "@/hooks/useVerification";
+import type { useVerification } from "@/hooks/useVerification";
 
-export function VerificationBanner() {
-  const { verification, accept, decline, confirm, mismatch } = useVerification();
-
+// Takes the shared useVerification() return value as props rather than
+// calling the hook itself — it must observe the same request Header's
+// "Verify this device" button starts, not an independent instance.
+export function VerificationBanner({
+  verification,
+  accept,
+  decline,
+  confirm,
+  mismatch,
+}: ReturnType<typeof useVerification>) {
   if (!verification) return null;
 
   const { step, otherUserId, otherDeviceId, isSelfVerification, sasData } =
@@ -67,6 +74,21 @@ export function VerificationBanner() {
         {/* Step: waiting for verifier to start */}
         {step === "accepting" && (
           <p className="text-sm text-gray-500">Starting verification…</p>
+        )}
+
+        {/* Step: outgoing self-verification request, waiting on another device */}
+        {step === "waiting" && (
+          <>
+            <p className="text-sm text-gray-700">
+              Waiting for one of your other signed-in devices to accept…
+            </p>
+            <button
+              onClick={decline}
+              className="w-full text-sm border border-gray-300 px-3 py-1.5 rounded hover:bg-gray-50"
+            >
+              Cancel
+            </button>
+          </>
         )}
 
         {/* Step: SAS emoji comparison */}

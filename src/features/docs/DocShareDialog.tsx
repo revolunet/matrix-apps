@@ -1,12 +1,45 @@
 import { useEffect, useRef, useState } from "react";
 import { RoomMemberEvent } from "matrix-js-sdk";
-import type { MatrixEvent, RoomMember } from "matrix-js-sdk";
+import type { MatrixClient, MatrixEvent, RoomMember } from "matrix-js-sdk";
 import { useAuthStore } from "@/stores/auth.store";
 import { useDocsStore } from "@/stores/docs.store";
 
 interface Props {
   docId: string;
   roomId: string;
+}
+
+// For rooms with shared history visibility, client.invite() also forwards
+// the room's historical Megolm keys to the invitee (see
+// shareRoomHistoryWithUser in matrix-js-sdk's invite()) — which needs
+// access to any old session this device doesn't have in memory, restoring
+// it from the server-side key backup if necessary. If this device's
+// cached backup version has gone stale (the server moved to a newer one
+// since bootstrapCrypto() in client.ts last checked — e.g. someone reset
+// their recovery key from another client), that restore 404s with this
+// exact message and the whole invite rejects.
+function isStaleBackupVersionError(err: unknown): boolean {
+  return err instanceof Error && err.message.includes("Unknown backup version");
+}
+
+/**
+ * Wraps client.invite() with a one-time recovery from a stale cached key
+ * backup version (see isStaleBackupVersionError): refresh what this device
+ * thinks the current backup version is, then retry once. A second failure
+ * (stale-backup or otherwise) is left to propagate as-is.
+ */
+async function inviteWithBackupRetry(
+  client: MatrixClient,
+  roomId: string,
+  userId: string,
+): Promise<void> {
+  try {
+    await client.invite(roomId, userId);
+  } catch (err) {
+    if (!isStaleBackupVersionError(err)) throw err;
+    await client.getCrypto()?.checkKeyBackupAndEnable();
+    await client.invite(roomId, userId);
+  }
 }
 
 export function DocShareDialog({ docId, roomId }: Props) {
@@ -70,7 +103,7 @@ export function DocShareDialog({ docId, roomId }: Props) {
     setShareWarning(null);
     setSuccess(false);
     try {
-      await client.invite(roomId, target);
+      await inviteWithBackupRetry(client, roomId, target);
 
       // Sub-docs are their own independent Matrix rooms — sharing the
       // parent doesn't grant access to them, so fan the invite out to every
@@ -81,7 +114,7 @@ export function DocShareDialog({ docId, roomId }: Props) {
         return membership !== "join" && membership !== "invite";
       });
       const results = await Promise.allSettled(
-        descendantRoomIds.map((rid) => client.invite(rid, target)),
+        descendantRoomIds.map((rid) => inviteWithBackupRetry(client, rid, target)),
       );
       const failed = results.filter((r) => r.status === "rejected").length;
       if (failed > 0) {

@@ -151,6 +151,10 @@ export function useMatrixCollaboration(roomId: string) {
   // Tracks a *remote* revision known to exist (a live event arrived) but not
   // yet decrypted/applied — see MatrixYjsProvider.onReceivingStateChange.
   const [isReceiving, setIsReceiving] = useState(false);
+  // True once an event in this room permanently failed to decrypt — the
+  // document may be missing content this device never got the keys for.
+  // See MatrixYjsProvider.onDecryptionErrorChange.
+  const [hasDecryptionErrors, setHasDecryptionErrors] = useState(false);
 
   useEffect(() => {
     if (!client) return;
@@ -165,6 +169,8 @@ export function useMatrixCollaboration(roomId: string) {
     provider.onSyncStateChange = setIsSyncing;
     setIsReceiving(provider.isReceiving());
     provider.onReceivingStateChange = setIsReceiving;
+    setHasDecryptionErrors(provider.hasDecryptionErrors());
+    provider.onDecryptionErrorChange = setHasDecryptionErrors;
 
     provider.awareness.setLocalStateField("user", {
       name: userId,
@@ -192,12 +198,19 @@ export function useMatrixCollaboration(roomId: string) {
       client.off(MatrixEventEvent.Decrypted, onDecrypted);
       provider.onSyncStateChange = null;
       provider.onReceivingStateChange = null;
+      provider.onDecryptionErrorChange = null;
       providerRef.current = null;
       provider.destroy();
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const ydoc = ydocRef.current!;
+
+  // Best-effort ask to any other currently-open client for a fresh
+  // snapshot — see MatrixYjsProvider.requestResync.
+  const requestResync = () => {
+    void providerRef.current?.requestResync();
+  };
 
   const editor = useCreateBlockNote(
     {
@@ -257,5 +270,5 @@ export function useMatrixCollaboration(roomId: string) {
     [],
   );
 
-  return { editor, loadState, isSyncing, isReceiving };
+  return { editor, loadState, isSyncing, isReceiving, hasDecryptionErrors, requestResync };
 }

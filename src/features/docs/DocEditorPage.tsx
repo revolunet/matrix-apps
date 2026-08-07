@@ -23,10 +23,12 @@ function DocLoadStatus({
   loadState,
   isSyncing,
   isReceiving,
+  hasDecryptionErrors,
 }: {
   loadState: DocLoadState;
   isSyncing: boolean;
   isReceiving: boolean;
+  hasDecryptionErrors: boolean;
 }) {
   if (loadState === "loading") {
     return (
@@ -69,6 +71,14 @@ function DocLoadStatus({
       </span>
     );
   }
+  if (hasDecryptionErrors) {
+    return (
+      <span className="flex items-center gap-1.5 text-xs text-amber-600">
+        <span className="w-1.5 h-1.5 rounded-full bg-amber-500" />
+        Incomplete
+      </span>
+    );
+  }
   return (
     <span className="flex items-center gap-1.5 text-xs text-green-600">
       <span className="w-1.5 h-1.5 rounded-full bg-green-500" />
@@ -102,7 +112,8 @@ function DocEditorInner({ docId, roomId }: { docId: string; roomId: string }) {
   const handlePostComment = (body: string) => sendDocComment(client, roomId, docId, body);
 
   // Keyed on roomId — fresh Y.Doc + provider per room
-  const { editor, loadState, isSyncing, isReceiving } = useMatrixCollaboration(roomId);
+  const { editor, loadState, isSyncing, isReceiving, hasDecryptionErrors, requestResync } =
+    useMatrixCollaboration(roomId);
 
   // doc.title only reflects a remote rename (e.g. the owner renaming from
   // another session, or a collaborator's live-refreshed shared-doc state) —
@@ -152,11 +163,32 @@ function DocEditorInner({ docId, roomId }: { docId: string; roomId: string }) {
             />
           </div>
           <div className="flex items-center gap-2 flex-none">
-            <DocLoadStatus loadState={loadState} isSyncing={isSyncing} isReceiving={isReceiving} />
+            <DocLoadStatus
+              loadState={loadState}
+              isSyncing={isSyncing}
+              isReceiving={isReceiving}
+              hasDecryptionErrors={hasDecryptionErrors}
+            />
             <DocShareDialog docId={docId} roomId={roomId} />
             <CommentsToggleButton open={showComments} hasUnseen={hasUnseenComments} onClick={toggleComments} />
           </div>
         </div>
+
+        {loadState === "loaded" && hasDecryptionErrors && (
+          <div className="px-6 py-2 bg-amber-50 border-b border-amber-100 text-xs text-amber-800 flex-none flex items-center justify-between gap-3">
+            <span>
+              Some content in this document couldn't be decrypted on this device
+              and may be missing below. Open it from a device that has synced
+              it before, or verify this device against one, to recover it.
+            </span>
+            <button
+              onClick={() => requestResync()}
+              className="text-amber-900 underline hover:no-underline flex-none whitespace-nowrap"
+            >
+              Ask another device
+            </button>
+          </div>
+        )}
 
         {/* Editor */}
         <div className="flex-1 overflow-y-auto">
