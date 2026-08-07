@@ -107,7 +107,7 @@ Each entity instance gets two encrypted Matrix rooms (`data` + `comments`); a pe
 
 ### Docs
 
-Each document is one encrypted Matrix room. A `MatrixYjsProvider` streams incremental Yjs updates as room events, periodically collapsing them into a full-state snapshot so reloads and new collaborators don't have to decrypt the entire history. Document hierarchy (nesting, ordering) lives in an `account_data` index for the owner, mirrored into room state so people the doc is shared _with_ — who can't read the owner's private index — still see the right title and position in the tree.
+Each document is one encrypted Matrix room. A `MatrixYjsProvider` streams incremental Yjs updates as room events, periodically collapsing them into a full-state snapshot so reloads and new collaborators don't have to decrypt the entire history. Document hierarchy (nesting, ordering) is backed by real Matrix Spaces: a per-user "root space" room holds `m.space.child` links for top-level docs, and nested docs hold the same links on their own parent's room, with sibling order stored as a fractional-indexing key. An `account_data` index tracks each owned doc's identity (id/room/title) for the owner; people the doc is shared _with_ — who can't read the owner's private index — recover the title from a state event mirrored into the doc's own room instead.
 
 ### Directory layout
 
@@ -116,8 +116,8 @@ src/
 ├── entities/         Entity type definitions, registry, per-type schema+config
 ├── features/docs/    Docs editor, tree/hierarchy, comments, sharing
 ├── matrix/           Client lifecycle, auth, entity/doc rooms, Yjs↔Matrix bridge, sync
-├── stores/           Zustand: auth, entity, sync
-├── hooks/            useMatrixClient, useEntitySync, useShareContact
+├── stores/           Zustand: auth, entity, docs, sync
+├── hooks/            useMatrixClient, useEntitySync, useShareContact, useVerification
 ├── components/       Shared entity/layout/comment/verification UI
 └── pages/            Login, entity list/detail, new-entity
 ```
