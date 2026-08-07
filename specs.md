@@ -1,6 +1,9 @@
-# Matrix CMS Prototype — Specification
+# Matrix Apps Prototype — Specification
 
-A web frontend for a multi-entity CRM that uses the Matrix protocol as a fully end-to-end-encrypted backend. No application server. All persistence is in Matrix rooms and `account_data` on a homeserver.
+A web frontend hosting two applications that share one login and one encryption layer, both using the Matrix protocol as a fully end-to-end-encrypted backend. No application server. All persistence is in Matrix rooms and `account_data` on a homeserver.
+
+- **CRM** (`/:entityType`) — a multi-entity CRM (Contacts, Companies, Trainings), documented below under Entity Registry / Models / Channels.
+- **Docs** (`/docs`) — a real-time collaborative rich-text editor with a Notion-style nested page hierarchy, documented below under [Docs](#docs).
 
 ## Authentication
 
@@ -116,7 +119,7 @@ Relation fields are stored as `string[]` (arrays of UUIDs) in the entity snapsho
 - All entity data, comments, and file metadata are encrypted with Megolm (`m.megolm.v1.aes-sha2`).
 - Crypto is handled by the Rust/WASM backend (`@matrix-org/matrix-sdk-crypto-wasm`), initialised via `initRustCrypto`.
 - Secret storage and cross-signing are bootstrapped automatically on first login.
-- File bytes are uploaded to the homeserver media repository without client-side encryption (known limitation).
+- CRM file bytes are uploaded to the homeserver media repository without client-side encryption (known limitation). Docs attachments are the exception — see [File attachments](#file-attachments) below.
 
 ## Adding a New Entity Type
 
@@ -125,3 +128,51 @@ Relation fields are stored as `string[]` (arrays of UUIDs) in the entity snapsho
 3. Add `import "@/entities/<type>/config"` to `src/App.tsx`
 
 Routes, forms, list view, detail view, sidebar navigation, and Matrix storage all work automatically.
+
+---
+
+## Docs
+
+A second app (`/docs`), sharing the CRM's login and encryption layer but with its own structural choices: one Matrix room per document (not two), a CRDT instead of latest-write-wins snapshots, and a Notion-style nested page hierarchy.
+
+### Document model
+
+- One encrypted Matrix room per document, holding the document body, comments, and metadata together (unlike the CRM's data/comments split).
+- Created with `m.room.encryption` (Megolm) plus a `DOC_META_STATE_TYPE` (`org.demo-e2e-app.doc.meta`) state event carrying `{ title, docId }`.
+- Room creation retries on `M_LIMIT_EXCEEDED`, backing off per the homeserver's recommended `retry_after_ms`.
+
+### Hierarchy
+
+- Backed by real Matrix Spaces: a per-user "root space" room (auto-created, `m.space` type) holds `m.space.child` links for every top-level doc; nested docs use `m.space.child` state on their own parent doc's room.
+- Sibling order is a fractional-indexing key stored in the `m.space.child` event's `order` field, enabling drag-and-drop reorder/reparent without rewriting other siblings.
+- `docs_index` account_data (`org.demo-e2e-app.docs_index`) stores each owned doc's identity (`docId`, `roomId`, `title`, `createdAt`) — private to the owner; hierarchy is derived at load time from `m.space.child` state, not stored in this index.
+- Collaborators can't read the owner's private index, so they recover a shared doc's title/identity from its room's `DOC_META_STATE_TYPE` state event instead.
+
+### Real-time collaboration
+
+- Document body is a Yjs CRDT rendered by the BlockNote editor; edits sync as Matrix room events rather than over a WebSocket/WebRTC provider.
+- Local edits are debounced (300ms), merged, and sent as one `org.demo-e2e-app.doc.yjs.update` event. A full-state `org.demo-e2e-app.doc.yjs.snapshot` is sent every 20 updates and on every new member join, so loading a doc only needs the latest snapshot plus subsequent updates.
+- Updates/snapshots over ~24KB are chunked across multiple events to stay under Matrix's 65536-byte event size limit once encryption overhead is included.
+- A client that detects undecryptable content in a doc can broadcast a resync request; any other currently-open client with a healthy copy answers with a fresh snapshot — no device verification required.
+- Blocks: all default BlockNote blocks (paragraphs, headings, lists, tables, embedded files/images, etc.) plus custom Callout (emoji + colored background), Page Break, and Multi-column layout blocks, all reachable from the `/` slash menu.
+
+### Comments
+
+- Comments live in the document's own room (no separate comments room) as `m.room.message` events flagged with `doc_comment: true` and `doc_id`.
+
+### File attachments
+
+- Files dropped into the editor are encrypted client-side (AES-256-CTR + SHA-256 integrity hash — Matrix's standard encrypted-attachment scheme) before upload; the media repository only ever stores ciphertext. The decryption key/IV travel solely inside the E2E-encrypted room event.
+- This is stricter than CRM file attachments, which upload unencrypted bytes.
+
+### Sharing
+
+- Same invite-a-Matrix-user model as CRM entities, applied to the doc's own room.
+- Every sub-document is an independent room, so sharing (or unsharing) a parent doc fans the invite/kick out to every existing descendant room. A sub-document created after a share automatically inherits the parent's current members.
+- No single source of truth tracks "who has access to a doc tree" — it's the union of these fan-outs, so moving a doc to a new parent doesn't retroactively fix up its membership (known limitation).
+
+### UI
+
+- Left panel: drag-and-drop document tree (own docs, plus a read-only "Shared with me" section), resizable, with inline rename/create/delete.
+- Editor header: inline-editable title (read-only for shared docs), sync status indicator (Syncing… / Synced / Saving… / Updating… / Failed to sync), Share button, Comments toggle.
+- Comments sidebar reuses the same component set as the CRM's comment UI.
