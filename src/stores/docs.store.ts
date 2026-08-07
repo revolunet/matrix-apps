@@ -7,17 +7,41 @@ import {
   saveDocsIndex,
   createDocRoom,
   setDocMeta,
+  setSpaceChild,
+  removeSpaceChild,
+  ensureRootSpaceRoomId,
+  buildSpaceHierarchy,
+  orderBetween,
   type DocIndexEntry,
 } from "@/matrix/docs-matrix";
 
-export interface DocTreeNode extends DocIndexEntry {
+/** Absolute-time version of RoomCreationRetry, for a component to diff
+ * against Date.now() on its own ticking interval rather than a duration
+ * that goes stale the instant it's read. */
+export interface PendingRoomCreation {
+  attempt: number;
+  retryAt: number;
+}
+
+/** A doc's identity fields plus its tree position, derived at load time from
+ * m.space.child state (see buildSpaceHierarchy) rather than stored inline. */
+export interface DocEntry extends DocIndexEntry {
+  parentDocId: string | null;
+  order: string;
+}
+
+export interface DocTreeNode extends DocEntry {
   children: DocTreeNode[];
 }
 
 interface DocsState {
-  docs: DocIndexEntry[];
-  sharedDocs: DocIndexEntry[];
+  docs: DocEntry[];
+  sharedDocs: DocEntry[];
+  rootSpaceRoomId: string | null;
   loading: boolean;
+  /** docId -> in-progress rate-limit retry state, for docs whose room
+   * creation is currently being throttled by the homeserver. */
+  pendingRoomCreations: Record<string, PendingRoomCreation>;
 
   loadDocs: (client: MatrixClient) => Promise<void>;
   /** Returns optimistic entry immediately; Matrix room is created in the background. */
@@ -25,7 +49,7 @@ interface DocsState {
     client: MatrixClient,
     title: string,
     parentDocId?: string | null,
-  ) => DocIndexEntry;
+  ) => DocEntry;
   deleteDoc: (client: MatrixClient, docId: string) => Promise<void>;
   /** Leaves the Matrix room(s) for a doc shared with the current user, removing it from "Shared with me". */
   removeSharedDoc: (client: MatrixClient, docId: string) => Promise<void>;
@@ -34,19 +58,59 @@ interface DocsState {
     client: MatrixClient,
     docId: string,
     newParentDocId: string | null,
-    newOrder: number,
+    newOrder: string,
   ) => Promise<void>;
-  reorderDocs: (client: MatrixClient, reordered: DocIndexEntry[]) => Promise<void>;
+  /** Reorders a single doc among its current siblings (same parent). */
+  reorderDoc: (client: MatrixClient, docId: string, newOrder: string) => Promise<void>;
 
-  getDocById: (docId: string) => DocIndexEntry | undefined;
+  getDocById: (docId: string) => DocEntry | undefined;
   getTree: () => DocTreeNode[];
   getSharedTree: () => DocTreeNode[];
   /** Room IDs of every descendant of docId, across both owned and shared docs. */
   getDescendantRoomIds: (docId: string) => string[];
 }
 
-function buildTree(docs: DocIndexEntry[]): DocTreeNode[] {
-  const sorted = [...docs].sort((a, b) => a.order - b.order);
+/**
+ * Docs with no m.space.child listing anywhere the user can see (never
+ * ordered/moved since this feature shipped) get "" as a sentinel from
+ * buildSpaceHierarchy's fallback. That's not a usable fractional-indexing
+ * key — dragging one would crash generateKeyBetween — so give every such
+ * doc a real key here, synthesized deterministically (sorted by createdAt)
+ * so the assignment is stable across reloads without needing to persist
+ * anything until the doc is actually created/moved/reordered through the
+ * new code path, at which point a real m.space.child write takes over.
+ */
+function withFallbackOrder(docs: DocEntry[]): DocEntry[] {
+  const byParent = new Map<string | null, DocEntry[]>();
+  for (const d of docs) {
+    const list = byParent.get(d.parentDocId) ?? [];
+    list.push(d);
+    byParent.set(d.parentDocId, list);
+  }
+
+  const resolved = new Map<string, DocEntry>();
+  for (const siblings of byParent.values()) {
+    const ordered = siblings.filter((d) => d.order !== "");
+    const orderless = siblings
+      .filter((d) => d.order === "")
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+
+    let prevOrder = ordered.reduce<string | undefined>(
+      (max, d) => (max === undefined || d.order > max ? d.order : max),
+      undefined,
+    );
+    for (const d of orderless) {
+      const newOrder = orderBetween(prevOrder, undefined);
+      resolved.set(d.docId, { ...d, order: newOrder });
+      prevOrder = newOrder;
+    }
+  }
+
+  return docs.map((d) => resolved.get(d.docId) ?? d);
+}
+
+function buildTree(docs: DocEntry[]): DocTreeNode[] {
+  const sorted = [...docs].sort((a, b) => (a.order < b.order ? -1 : a.order > b.order ? 1 : 0));
   const map = new Map<string, DocTreeNode>(
     sorted.map((d) => [d.docId, { ...d, children: [] }]),
   );
@@ -66,17 +130,49 @@ function buildTree(docs: DocIndexEntry[]): DocTreeNode[] {
   return roots;
 }
 
-// Persist only docs that have a real roomId (skip optimistic entries that
-// haven't been assigned a room yet — those are in-flight and will be saved
-// by createDocRoom once the room is created).
-function persistableDocs(docs: DocIndexEntry[]): DocIndexEntry[] {
-  return docs.filter((d) => d.roomId !== null) as DocIndexEntry[];
+// Persist only identity fields for docs that have a real roomId (skip
+// optimistic entries that haven't been assigned a room yet — those are
+// in-flight and will be saved once createDocRoom resolves). Hierarchy
+// (parentDocId/order) is never persisted here — it lives in m.space.child
+// state, not the account-data index.
+function persistableDocs(docs: DocEntry[]): DocIndexEntry[] {
+  return docs
+    .filter((d): d is DocEntry & { roomId: string } => d.roomId !== null)
+    .map(({ docId, roomId, title, createdAt }) => ({ docId, roomId, title, createdAt }));
+}
+
+/**
+ * Waits briefly for a just-created parent doc's roomId to show up in the
+ * store. Creating a sub-doc requires the parent's room to exist (its
+ * m.space.child link is written on the parent's own room), which is normally
+ * already true by the time a user clicks "add child" on a rendered tree
+ * item — this only matters for the narrow race of adding a child before the
+ * parent's own room-creation round-trip has finished.
+ */
+async function waitForRoomId(
+  get: () => DocsState,
+  docId: string,
+  timeoutMs = 8000,
+): Promise<string | null> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const roomId = get().docs.find((d) => d.docId === docId)?.roomId;
+    if (roomId) return roomId;
+    await new Promise((resolve) => setTimeout(resolve, 150));
+  }
+  return null;
+}
+
+function omitKey<T>(record: Record<string, T>, key: string): Record<string, T> {
+  return Object.fromEntries(Object.entries(record).filter(([k]) => k !== key));
 }
 
 export const useDocsStore = create<DocsState>((set, get) => ({
   docs: [],
   sharedDocs: [],
+  rootSpaceRoomId: null,
   loading: false,
+  pendingRoomCreations: {},
 
   loadDocs: async (client) => {
     set({ loading: true });
@@ -89,22 +185,67 @@ export const useDocsStore = create<DocsState>((set, get) => ({
     // and so its room isn't wrongly counted as "shared" below.
     const indexDocIds = new Set(indexDocs.map((d) => d.docId));
     const pendingLocalDocs = get().docs.filter((d) => !indexDocIds.has(d.docId));
-    const docs = [...indexDocs, ...pendingLocalDocs];
+    const identityDocs: DocIndexEntry[] = [
+      ...indexDocs,
+      ...pendingLocalDocs.map(({ docId, roomId, title, createdAt }) => ({
+        docId,
+        roomId,
+        title,
+        createdAt,
+      })),
+    ];
 
-    const ownRoomIds = docs.map((d) => d.roomId).filter((id): id is string => !!id);
-    const sharedDocs = loadSharedDocs(client, ownRoomIds);
-    set({ docs, sharedDocs, loading: false });
+    const rootSpaceRoomId = await ensureRootSpaceRoomId(client);
+
+    const ownRoomIds = identityDocs.map((d) => d.roomId).filter((id): id is string => !!id);
+    const sharedIdentity = loadSharedDocs(client, ownRoomIds);
+
+    const docIdByRoomId = new Map<string, string>();
+    for (const d of identityDocs) if (d.roomId) docIdByRoomId.set(d.roomId, d.docId);
+    for (const d of sharedIdentity) if (d.roomId) docIdByRoomId.set(d.roomId, d.docId);
+
+    const hierarchy = buildSpaceHierarchy(client, docIdByRoomId, rootSpaceRoomId);
+
+    // Entries with no m.space.child listing visible to us yet (a doc whose
+    // setSpaceChild write hasn't synced back, or a shared doc whose parent
+    // room we're not in) fall back to whatever hierarchy we already had
+    // locally, then finally to a root-level, last-sorting position.
+    const prevByDocId = new Map(get().docs.map((d) => [d.docId, d]));
+    const prevSharedByDocId = new Map(get().sharedDocs.map((d) => [d.docId, d]));
+
+    const withHierarchy = (
+      list: DocIndexEntry[],
+      prev: Map<string, DocEntry>,
+    ): DocEntry[] =>
+      list.map((d) => {
+        const h = hierarchy.get(d.docId);
+        if (h) return { ...d, parentDocId: h.parentDocId, order: h.order };
+        const fallback = prev.get(d.docId);
+        return {
+          ...d,
+          parentDocId: fallback?.parentDocId ?? null,
+          order: fallback?.order ?? "",
+        };
+      });
+
+    const docs = withFallbackOrder(withHierarchy(identityDocs, prevByDocId));
+    const sharedDocs = withFallbackOrder(withHierarchy(sharedIdentity, prevSharedByDocId));
+
+    set({ docs, sharedDocs, rootSpaceRoomId, loading: false });
   },
 
   createDoc: (client, title, parentDocId = null) => {
     const docId = uuidv4();
     const docs = get().docs;
-    const siblings = docs.filter((d) => d.parentDocId === (parentDocId ?? null));
-    const order = siblings.reduce((m, d) => Math.max(m, d.order), -1) + 1;
+    const siblings = docs
+      .filter((d) => d.parentDocId === (parentDocId ?? null))
+      .sort((a, b) => (a.order < b.order ? -1 : a.order > b.order ? 1 : 0));
+    const order = orderBetween(siblings.at(-1)?.order, undefined);
     const createdAt = new Date().toISOString();
 
-    // Optimistic entry — visible in the tree immediately, roomId filled in async
-    const optimistic: DocIndexEntry = {
+    // Optimistic entry — visible in the tree, in its final position,
+    // immediately; roomId filled in async.
+    const optimistic: DocEntry = {
       docId,
       roomId: null,
       title,
@@ -117,13 +258,30 @@ export const useDocsStore = create<DocsState>((set, get) => ({
 
     // Create the Matrix room in the background, then persist using the store's
     // current state (not stale account-data) to avoid overwriting concurrent renames.
-    void createDocRoom(client, docId, title, parentDocId ?? null)
+    void createDocRoom(client, docId, title, (retry) => {
+      set((s) => ({
+        pendingRoomCreations: {
+          ...s.pendingRoomCreations,
+          [docId]: { attempt: retry.attempt, retryAt: Date.now() + retry.retryAfterMs },
+        },
+      }));
+    })
       .then(async (roomId) => {
         set((s) => {
           const updated = s.docs.map((d) => (d.docId === docId ? { ...d, roomId } : d));
           void saveDocsIndex(client, persistableDocs(updated));
-          return { docs: updated };
+          return { docs: updated, pendingRoomCreations: omitKey(s.pendingRoomCreations, docId) };
         });
+
+        // The doc's m.space.child link lives on its parent's own room (or
+        // the root space room for a top-level doc) — resolve whichever
+        // applies before writing the link.
+        const parentRoomId = parentDocId ? await waitForRoomId(get, parentDocId) : null;
+        const spaceParentRoomId =
+          parentRoomId ?? get().rootSpaceRoomId ?? (await ensureRootSpaceRoomId(client));
+        await setSpaceChild(client, spaceParentRoomId, roomId, order).catch((err) =>
+          console.warn("[docs] failed to set space-child order:", err),
+        );
 
         // Sub-docs are their own independent Matrix rooms — inherit whoever
         // currently has access to the parent so a doc shared earlier also
@@ -131,9 +289,6 @@ export const useDocsStore = create<DocsState>((set, get) => ({
         // already existed at share time (see DocShareDialog for the
         // opposite direction: sharing/unsharing an existing doc fanning out
         // to its existing descendants).
-        const parentRoomId = parentDocId
-          ? get().docs.find((d) => d.docId === parentDocId)?.roomId
-          : null;
         const parentRoom = parentRoomId ? client.getRoom(parentRoomId) : null;
         if (parentRoom) {
           const invitees = parentRoom
@@ -155,7 +310,10 @@ export const useDocsStore = create<DocsState>((set, get) => ({
       })
       .catch((err) => {
         console.error("[docs] failed to create Matrix room:", err);
-        set((s) => ({ docs: s.docs.filter((d) => d.docId !== docId) }));
+        set((s) => ({
+          docs: s.docs.filter((d) => d.docId !== docId),
+          pendingRoomCreations: omitKey(s.pendingRoomCreations, docId),
+        }));
       });
 
     return optimistic;
@@ -163,6 +321,7 @@ export const useDocsStore = create<DocsState>((set, get) => ({
 
   deleteDoc: async (client, docId) => {
     const docs = get().docs;
+    const target = docs.find((d) => d.docId === docId);
     const toRemove = new Set<string>();
     const queue = [docId];
     while (queue.length) {
@@ -177,6 +336,19 @@ export const useDocsStore = create<DocsState>((set, get) => ({
     const updated = docs.filter((d) => !toRemove.has(d.docId));
     set({ docs: updated });
     await saveDocsIndex(client, persistableDocs(updated));
+
+    // Clean up the stale m.space.child link on the (still-joined) parent
+    // room — best-effort, same as the room-leave calls below.
+    if (target?.roomId) {
+      const parentRoomId = target.parentDocId
+        ? docs.find((d) => d.docId === target.parentDocId)?.roomId
+        : get().rootSpaceRoomId;
+      if (parentRoomId) {
+        await removeSpaceChild(client, parentRoomId, target.roomId).catch((err) =>
+          console.warn("[docs] failed to clear space-child link for deleted doc:", err),
+        );
+      }
+    }
 
     // Also leave the rooms — otherwise we stay a joined member with no
     // index entry, so loadSharedDocs() misclassifies the deleted doc as
@@ -229,34 +401,57 @@ export const useDocsStore = create<DocsState>((set, get) => ({
     // unless we push it there too.
     const entry = updated.find((d) => d.docId === docId);
     if (entry?.roomId) {
-      await setDocMeta(client, entry.roomId, docId, title, entry.parentDocId).catch(
+      await setDocMeta(client, entry.roomId, docId, title).catch(
         (err) => console.warn("[docs] failed to sync title to room state:", err),
       );
     }
   },
 
   moveDoc: async (client, docId, newParentDocId, newOrder) => {
+    const current = get().docs.find((d) => d.docId === docId);
+    if (!current) return;
+    const oldParentDocId = current.parentDocId;
+
     const updated = get().docs.map((d) =>
       d.docId === docId ? { ...d, parentDocId: newParentDocId, order: newOrder } : d,
     );
     set({ docs: updated });
-    await saveDocsIndex(client, persistableDocs(updated));
 
-    // Same reasoning as renameDoc — collaborators derive hierarchy from the
-    // room's state event, not our private index.
-    const entry = updated.find((d) => d.docId === docId);
-    if (entry?.roomId) {
-      await setDocMeta(client, entry.roomId, docId, entry.title, newParentDocId).catch(
-        (err) => console.warn("[docs] failed to sync parent to room state:", err),
+    if (!current.roomId) return;
+
+    const resolveParentRoomId = (parentDocId: string | null) =>
+      parentDocId ? get().docs.find((d) => d.docId === parentDocId)?.roomId ?? null : get().rootSpaceRoomId;
+
+    const oldParentRoomId = resolveParentRoomId(oldParentDocId);
+    const newParentRoomId = resolveParentRoomId(newParentDocId) ?? (await ensureRootSpaceRoomId(client));
+
+    if (oldParentRoomId && oldParentRoomId !== newParentRoomId) {
+      await removeSpaceChild(client, oldParentRoomId, current.roomId).catch((err) =>
+        console.warn("[docs] failed to clear old space-child link:", err),
       );
     }
+    await setSpaceChild(client, newParentRoomId, current.roomId, newOrder).catch((err) =>
+      console.warn("[docs] failed to set new space-child link:", err),
+    );
   },
 
-  reorderDocs: async (client, reordered) => {
-    const map = new Map(reordered.map((d) => [d.docId, d]));
-    const updated = get().docs.map((d) => map.get(d.docId) ?? d);
+  reorderDoc: async (client, docId, newOrder) => {
+    const updated = get().docs.map((d) => (d.docId === docId ? { ...d, order: newOrder } : d));
     set({ docs: updated });
-    await saveDocsIndex(client, persistableDocs(updated));
+
+    const entry = updated.find((d) => d.docId === docId);
+    if (!entry?.roomId) return;
+    const parentRoomId = entry.parentDocId
+      ? updated.find((d) => d.docId === entry.parentDocId)?.roomId
+      : get().rootSpaceRoomId;
+    if (!parentRoomId) return;
+
+    // No manual rollback on failure: this doesn't touch the real room
+    // state, so the next RoomStateEvent sync naturally reconciles the
+    // optimistic position back if the write never lands.
+    await setSpaceChild(client, parentRoomId, entry.roomId, newOrder).catch((err) =>
+      console.warn("[docs] failed to persist reorder:", err),
+    );
   },
 
   getDocById: (docId) =>

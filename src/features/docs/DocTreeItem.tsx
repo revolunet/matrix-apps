@@ -1,12 +1,21 @@
 import { useState, useRef, useEffect } from "react";
 import { NavLink, useNavigate } from "react-router-dom";
-import { useSortable } from "@dnd-kit/sortable";
+import { SortableContext, useSortable, verticalListSortingStrategy } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import type { DocTreeNode } from "@/stores/docs.store";
+
+/** "before"/"after" reorder as a sibling of the hovered row; "nest" drops
+ * the dragged doc in as the hovered row's child. */
+export type DropZone = "before" | "after" | "nest";
+export interface DropIndicator {
+  docId: string;
+  zone: DropZone;
+}
 
 interface Props {
   node: DocTreeNode;
   depth?: number;
+  dropIndicator?: DropIndicator | null;
   onRename: (docId: string, title: string) => void;
   onDelete: (docId: string) => void;
   onAddChild: (parentDocId: string) => void;
@@ -15,6 +24,7 @@ interface Props {
 export function DocTreeItem({
   node,
   depth = 0,
+  dropIndicator,
   onRename,
   onDelete,
   onAddChild,
@@ -34,6 +44,8 @@ export function DocTreeItem({
     transition,
     opacity: isDragging ? 0.4 : 1,
   };
+
+  const zone = dropIndicator?.docId === node.docId ? dropIndicator.zone : null;
 
   useEffect(() => {
     if (isRenaming && renameInputRef.current) {
@@ -55,7 +67,11 @@ export function DocTreeItem({
   return (
     <div ref={setNodeRef} style={style}>
       <div
-        className="group flex items-center gap-1 pr-1 rounded cursor-pointer hover:bg-gray-100"
+        className={`group flex items-center gap-1 pr-1 rounded cursor-pointer border-t-2 border-b-2 ${
+          zone === "nest" ? "bg-blue-50 ring-1 ring-inset ring-blue-400" : "hover:bg-gray-100"
+        } ${zone === "before" ? "border-t-blue-500" : "border-t-transparent"} ${
+          zone === "after" ? "border-b-blue-500" : "border-b-transparent"
+        }`}
         style={{ paddingLeft }}
         onMouseEnter={() => setShowActions(true)}
         onMouseLeave={() => setShowActions(false)}
@@ -158,18 +174,24 @@ export function DocTreeItem({
 
       {/* Children */}
       {hasChildren && isExpanded && (
-        <div>
-          {node.children.map((child) => (
-            <DocTreeItem
-              key={child.docId}
-              node={child}
-              depth={depth + 1}
-              onRename={onRename}
-              onDelete={onDelete}
-              onAddChild={onAddChild}
-            />
-          ))}
-        </div>
+        <SortableContext
+          items={node.children.map((c) => c.docId)}
+          strategy={verticalListSortingStrategy}
+        >
+          <div>
+            {node.children.map((child) => (
+              <DocTreeItem
+                key={child.docId}
+                node={child}
+                depth={depth + 1}
+                dropIndicator={dropIndicator}
+                onRename={onRename}
+                onDelete={onDelete}
+                onAddChild={onAddChild}
+              />
+            ))}
+          </div>
+        </SortableContext>
       )}
     </div>
   );

@@ -8,16 +8,47 @@ import {
   useSensor,
   useSensors,
   type DragEndEvent,
+  type DragOverEvent,
 } from "@dnd-kit/core";
 import {
   SortableContext,
   sortableKeyboardCoordinates,
   verticalListSortingStrategy,
 } from "@dnd-kit/sortable";
-import { useDocsStore, type DocTreeNode } from "@/stores/docs.store";
+import { useDocsStore, type DocEntry, type DocTreeNode } from "@/stores/docs.store";
 import { useAuthStore } from "@/stores/auth.store";
-import { DocTreeItem } from "./DocTreeItem";
-import type { DocIndexEntry } from "@/matrix/docs-matrix";
+import { DocTreeItem, type DropIndicator, type DropZone } from "./DocTreeItem";
+import { orderBetween } from "@/matrix/docs-matrix";
+
+/** True if `docId` is `ancestorId` itself or a descendant of it — used to
+ * refuse drops that would make a doc its own ancestor. */
+function isDescendant(
+  docs: DocEntry[],
+  ancestorId: string,
+  docId: string | null,
+): boolean {
+  let current = docId;
+  while (current) {
+    if (current === ancestorId) return true;
+    current = docs.find((d) => d.docId === current)?.parentDocId ?? null;
+  }
+  return false;
+}
+
+/** Top/bottom edge of the hovered row reorders as a sibling; the middle
+ * band nests the dragged doc as a child of the hovered row. */
+function computeDropZone(
+  event: Pick<DragOverEvent, "active" | "over">,
+): DropIndicator | null {
+  const { active, over } = event;
+  if (!over || active.id === over.id) return null;
+  const activeRect = active.rect.current.translated;
+  const overRect = over.rect;
+  if (!activeRect || !overRect) return null;
+  const relativeY = (activeRect.top + activeRect.height / 2 - overRect.top) / overRect.height;
+  const zone: DropZone = relativeY < 0.3 ? "before" : relativeY > 0.7 ? "after" : "nest";
+  return { docId: String(over.id), zone };
+}
 
 /** Read-only tree item for shared documents — no dnd, no rename/create actions. */
 function SharedDocTreeItem({
@@ -106,7 +137,8 @@ export function DocTree() {
     deleteDoc,
     removeSharedDoc,
     renameDoc,
-    reorderDocs,
+    reorderDoc,
+    moveDoc,
     getTree,
     getSharedTree,
   } = useDocsStore();
@@ -114,6 +146,7 @@ export function DocTree() {
   const [creating, setCreating] = useState(false);
   const [newTitle, setNewTitle] = useState("");
   const [removingSharedId, setRemovingSharedId] = useState<string | null>(null);
+  const [dropIndicator, setDropIndicator] = useState<DropIndicator | null>(null);
 
   const tree = getTree();
   const sharedTree = getSharedTree();
@@ -125,29 +158,51 @@ export function DocTree() {
     }),
   );
 
+  const handleDragOver = (event: DragOverEvent) => {
+    setDropIndicator(computeDropZone(event));
+  };
+
+  const handleDragCancel = () => setDropIndicator(null);
+
   const handleDragEnd = async (event: DragEndEvent) => {
-    const { active, over } = event;
-    if (!over || active.id === over.id) return;
+    setDropIndicator(null);
+    const zoneInfo = computeDropZone(event);
+    if (!zoneInfo) return;
 
-    // Only handle root-level reordering for now
-    const rootDocs = docs
-      .filter((d) => !d.parentDocId)
-      .sort((a, b) => a.order - b.order);
+    const activeDoc = docs.find((d) => d.docId === event.active.id);
+    const overDoc = docs.find((d) => d.docId === zoneInfo.docId);
+    if (!activeDoc || !overDoc) return;
 
-    const oldIndex = rootDocs.findIndex((d) => d.docId === active.id);
-    const newIndex = rootDocs.findIndex((d) => d.docId === over.id);
-    if (oldIndex < 0 || newIndex < 0) return;
+    if (zoneInfo.zone === "nest") {
+      // Dropped onto the middle of a row — nest as its last child.
+      // Refuse if that row is the dragged doc itself or one of its own
+      // descendants, which would create a cycle.
+      if (isDescendant(docs, activeDoc.docId, overDoc.docId)) return;
+      const children = docs
+        .filter((d) => d.parentDocId === overDoc.docId)
+        .sort((a, b) => (a.order < b.order ? -1 : a.order > b.order ? 1 : 0));
+      const newOrder = orderBetween(children.at(-1)?.order, undefined);
+      await moveDoc(client, activeDoc.docId, overDoc.docId, newOrder);
+      return;
+    }
 
-    const reordered = [...rootDocs];
-    const [moved] = reordered.splice(oldIndex, 1);
-    reordered.splice(newIndex, 0, moved);
+    // Dropped on the top/bottom edge — position as a sibling of the
+    // hovered row, reparenting if it belongs to a different parent.
+    const targetParentDocId = overDoc.parentDocId;
+    if (isDescendant(docs, activeDoc.docId, targetParentDocId)) return;
 
-    const updated: DocIndexEntry[] = reordered.map((d, i) => ({
-      ...d,
-      order: i,
-    }));
+    const siblings = docs
+      .filter((d) => d.parentDocId === targetParentDocId && d.docId !== activeDoc.docId)
+      .sort((a, b) => (a.order < b.order ? -1 : a.order > b.order ? 1 : 0));
+    const overIndex = siblings.findIndex((d) => d.docId === overDoc.docId);
+    const insertIndex = zoneInfo.zone === "before" ? overIndex : overIndex + 1;
+    const newOrder = orderBetween(siblings[insertIndex - 1]?.order, siblings[insertIndex]?.order);
 
-    await reorderDocs(client, updated);
+    if (targetParentDocId === activeDoc.parentDocId) {
+      await reorderDoc(client, activeDoc.docId, newOrder);
+    } else {
+      await moveDoc(client, activeDoc.docId, targetParentDocId, newOrder);
+    }
   };
 
   const handleCreateDoc = () => {
@@ -181,7 +236,7 @@ export function DocTree() {
 
   const rootIds = docs
     .filter((d) => !d.parentDocId)
-    .sort((a, b) => a.order - b.order)
+    .sort((a, b) => (a.order < b.order ? -1 : a.order > b.order ? 1 : 0))
     .map((d) => d.docId);
 
   if (loading) {
@@ -243,7 +298,9 @@ export function DocTree() {
           <DndContext
             sensors={sensors}
             collisionDetection={closestCenter}
+            onDragOver={handleDragOver}
             onDragEnd={handleDragEnd}
+            onDragCancel={handleDragCancel}
           >
             <SortableContext
               items={rootIds}
@@ -254,6 +311,7 @@ export function DocTree() {
                   key={node.docId}
                   node={node}
                   depth={0}
+                  dropIndicator={dropIndicator}
                   onRename={(id, title) => renameDoc(client, id, title)}
                   onDelete={(id) => deleteDoc(client, id)}
                   onAddChild={handleAddChild}

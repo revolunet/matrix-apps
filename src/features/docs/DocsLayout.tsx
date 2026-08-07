@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Outlet } from "react-router-dom";
-import { ClientEvent, RoomMemberEvent, RoomStateEvent } from "matrix-js-sdk";
+import { ClientEvent, EventType, RoomMemberEvent, RoomStateEvent } from "matrix-js-sdk";
 import type { MatrixEvent } from "matrix-js-sdk";
 import { useAuthStore } from "@/stores/auth.store";
 import { useDocsStore } from "@/stores/docs.store";
@@ -22,11 +22,14 @@ export function DocsLayout() {
   useEffect(() => {
     loadDocs(client);
 
-    // Keep "Shared with me" live. A newly shared doc only becomes visible
-    // once its room shows up in client.getRooms(), our membership syncs to
-    // "join", and its DOC_META_STATE_TYPE state event arrives — each of
-    // which can land well after mount. Without this, loadDocs() is only
-    // ever called once, so a share sits invisible until the next remount.
+    // Keep "Shared with me" live, and the tree's structure/order in sync
+    // with m.space.child state written from other tabs/sessions (or as the
+    // echo of our own optimistic writes). A newly shared doc only becomes
+    // visible once its room shows up in client.getRooms(), our membership
+    // syncs to "join", and its DOC_META_STATE_TYPE state event arrives —
+    // each of which can land well after mount. Without this, loadDocs() is
+    // only ever called once, so a share (or a remote reorder/move) sits
+    // stale until the next remount.
     let refreshTimer: ReturnType<typeof setTimeout> | null = null;
     const scheduleRefresh = () => {
       if (refreshTimer) clearTimeout(refreshTimer);
@@ -39,7 +42,8 @@ export function DocsLayout() {
     const onRoom = () => scheduleRefresh();
     const onMembership = () => scheduleRefresh();
     const onRoomState = (event: MatrixEvent) => {
-      if (event.getType() === DOC_META_STATE_TYPE) scheduleRefresh();
+      const type = event.getType();
+      if (type === DOC_META_STATE_TYPE || type === EventType.SpaceChild) scheduleRefresh();
     };
 
     client.on(ClientEvent.Room, onRoom);

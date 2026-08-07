@@ -6,7 +6,7 @@ import { filterSuggestionItems } from "@blocknote/core/extensions";
 import { SuggestionMenuController } from "@blocknote/react";
 import { BlockNoteView } from "@blocknote/mantine";
 import { MantineProvider } from "@mantine/core";
-import { useDocsStore } from "@/stores/docs.store";
+import { useDocsStore, type PendingRoomCreation } from "@/stores/docs.store";
 import { useAuthStore } from "@/stores/auth.store";
 import {
   useMatrixCollaboration,
@@ -268,14 +268,52 @@ function DocEditorInner({ docId, roomId }: { docId: string; roomId: string }) {
   );
 }
 
-function CreatingState({ title }: { title: string }) {
+/** "5m 12s" above a minute, "12s" below — enough precision for a status line. */
+function formatRetryCountdown(ms: number): string {
+  const totalSeconds = Math.max(0, Math.ceil(ms / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`;
+}
+
+function CreatingState({
+  title,
+  retry,
+}: {
+  title: string;
+  retry?: PendingRoomCreation;
+}) {
+  // Ticks every second while a retry is pending so the countdown counts down
+  // live. Date.now() is read here (an effect), not during render — and the
+  // setState calls are deferred into a timer callback rather than made
+  // directly/synchronously in the effect body.
+  const [remainingMs, setRemainingMs] = useState<number | null>(null);
+  useEffect(() => {
+    if (!retry) {
+      const timeout = setTimeout(() => setRemainingMs(null), 0);
+      return () => clearTimeout(timeout);
+    }
+    const tick = () => setRemainingMs(Math.max(0, retry.retryAt - Date.now()));
+    const timeout = setTimeout(tick, 0);
+    const interval = setInterval(tick, 1000);
+    return () => {
+      clearTimeout(timeout);
+      clearInterval(interval);
+    };
+  }, [retry]);
+
+  const statusLabel =
+    retry && remainingMs !== null
+      ? `Rate limited by matrix.org — retrying in ${formatRetryCountdown(remainingMs)}`
+      : "Setting up encrypted room…";
+
   return (
     <div className="flex flex-col flex-1 min-w-0 h-full overflow-hidden">
       <div className="flex items-center gap-2 px-6 py-3 border-b border-gray-100">
         <span className="text-lg select-none">📄</span>
         <span className="text-sm font-medium text-gray-800">{title}</span>
         <span className="text-xs text-gray-400 animate-pulse ml-2">
-          Setting up encrypted room…
+          {statusLabel}
         </span>
       </div>
       <div className="flex-1 overflow-y-auto">
@@ -303,6 +341,9 @@ export function DocEditorPage() {
       s.docs.find((d) => d.docId === docId) ??
       s.sharedDocs.find((d) => d.docId === docId),
   );
+  const pendingRetry = useDocsStore((s) =>
+    docId ? s.pendingRoomCreations[docId] : undefined,
+  );
 
   if (!docId) return null;
 
@@ -316,7 +357,7 @@ export function DocEditorPage() {
 
   // Show a skeleton while the Matrix room is still being created
   if (!doc.roomId) {
-    return <CreatingState title={doc.title} />;
+    return <CreatingState title={doc.title} retry={pendingRetry} />;
   }
 
   // Key on roomId so the Y.Doc + provider remount cleanly on each document
